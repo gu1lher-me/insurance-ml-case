@@ -2,8 +2,11 @@
 Feature Matrix — 14-day Wound Model
 ====================================
 
-Generates `data/feature_store/feature_matrix_14d.parquet` with the same
-features as the 7-day matrix but:
+Generates:
+  - `data/feature_store/features_14d.parquet` with target-free features
+  - `data/processed/model_matrix_14d.parquet` with model-ready targets + features
+
+Artifacts use the same features as the 7-day matrix but:
   - stride = 14 days (non-overlapping)
   - target = wound_14d (any Wound incident in [t, t+14d))
 
@@ -21,7 +24,8 @@ import polars as pl
 
 ROOT = Path(__file__).resolve().parent.parent
 RAW = ROOT / "data" / "raw"
-OUT = ROOT / "data" / "feature_store" / "feature_matrix_14d.parquet"
+FEATURE_OUT = ROOT / "data" / "feature_store" / "features_14d.parquet"
+MODEL_OUT = ROOT / "data" / "processed" / "model_matrix_14d.parquet"
 
 SIGNAL_START = datetime(2023, 7, 1)
 SIGNAL_END = datetime(2025, 2, 1)
@@ -481,13 +485,18 @@ def main():
     targets = ["wound_14d"]
     feat_cols = [c for c in feature_matrix.columns if c not in meta + targets]
 
-    print(f"\n  Shape: {feature_matrix.shape[0]:,} × {feature_matrix.shape[1]}")
+    print(f"\n  Shape: {feature_matrix.shape[0]:,} x {feature_matrix.shape[1]}")
     print(f"  Features: {len(feat_cols)}")
     print(f"  wound_14d rate: {feature_matrix['wound_14d'].mean():.4%}")
 
-    OUT.parent.mkdir(parents=True, exist_ok=True)
-    feature_matrix.write_parquet(OUT)
-    print(f"\n  Saved to {OUT}")
+    features = feature_matrix.select(meta + feat_cols)
+
+    FEATURE_OUT.parent.mkdir(parents=True, exist_ok=True)
+    MODEL_OUT.parent.mkdir(parents=True, exist_ok=True)
+    features.write_parquet(FEATURE_OUT)
+    feature_matrix.write_parquet(MODEL_OUT)
+    print(f"\n  Saved target-free features to {FEATURE_OUT}")
+    print(f"  Saved model matrix to {MODEL_OUT}")
 
 
 if __name__ == "__main__":
