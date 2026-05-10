@@ -5,3 +5,4 @@ mlruns/
 *.csv
 mlflow.db
 */__pycache__/
+artifacts/
