@@ -14,7 +14,7 @@ Usage:
     python modeling/train_altercation.py
 """
 
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 
 import matplotlib
@@ -27,14 +27,8 @@ import pandas as pd
 import polars as pl
 from catboost import CatBoostClassifier
 from sklearn.calibration import CalibratedClassifierCV, calibration_curve
-from sklearn.metrics import (
-    auc,
-    brier_score_loss,
-    log_loss,
-    precision_recall_curve,
-    roc_auc_score,
-    roc_curve,
-)
+from sklearn.metrics import (auc, brier_score_loss, log_loss,
+                             precision_recall_curve, roc_auc_score, roc_curve)
 from sklearn.model_selection import StratifiedKFold
 
 matplotlib.use("Agg")

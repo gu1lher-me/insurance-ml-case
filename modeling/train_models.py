@@ -20,6 +20,7 @@ Usage:
 
 import warnings
 from datetime import date, timedelta
+from pathlib import Path
 
 import matplotlib
 import matplotlib.pyplot as plt
@@ -30,19 +31,10 @@ import numpy as np
 import pandas as pd
 import polars as pl
 from catboost import CatBoostClassifier
-from pathlib import Path
 from sklearn.calibration import CalibratedClassifierCV, calibration_curve
-from sklearn.metrics import (
-    auc,
-    brier_score_loss,
-    # f1_score,
-    log_loss,
-    precision_recall_curve,
-    # precision_score,
-    # recall_score,
-    roc_auc_score,
-    roc_curve,
-)
+from sklearn.metrics import (auc,  # f1_score,; precision_score,; recall_score,
+                             brier_score_loss, log_loss,
+                             precision_recall_curve, roc_auc_score, roc_curve)
 
 matplotlib.use("Agg")
 warnings.filterwarnings("ignore")
