@@ -15,6 +15,7 @@ Usage:
     python feature_engineering/build_wound_matrix.py
 """
 
+import argparse
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -63,6 +64,21 @@ def load_tables():
     document_tags = pl.read_parquet(RAW / "document_tags.parquet").filter(pl.col("deleted_at").is_null())
 
     return residents, vitals, incidents, diagnoses, hospital_transfers, needs, lab_reports, document_tags
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description="Build 14-day historical features and labels for wounds."
+    )
+    parser.add_argument("--signal-start", default=SIGNAL_START.date().isoformat())
+    parser.add_argument("--signal-end", default=SIGNAL_END.date().isoformat())
+    parser.add_argument("--feature-out", default=str(FEATURE_OUT))
+    parser.add_argument("--model-out", default=str(MODEL_OUT))
+    return parser.parse_args()
+
+
+def _parse_date(value):
+    return datetime.strptime(value, "%Y-%m-%d")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -427,7 +443,16 @@ def compute_document_tags(obs, document_tags):
 
 
 def main():
+    global SIGNAL_START, SIGNAL_END, FEATURE_OUT, MODEL_OUT
+
+    args = parse_args()
+    SIGNAL_START = _parse_date(args.signal_start)
+    SIGNAL_END = _parse_date(args.signal_end)
+    FEATURE_OUT = Path(args.feature_out)
+    MODEL_OUT = Path(args.model_out)
+
     print("Loading raw tables...")
+    print(f"  Signal window: {SIGNAL_START.date()} -> {SIGNAL_END.date()}")
     residents, vitals, incidents, diagnoses, transfers, needs, labs, doc_tags = load_tables()
 
     print("Building resident observation bounds...")

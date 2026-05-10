@@ -1,0 +1,24 @@
+{
+  "best_value": 0.1282056997932457,
+  "created_at": "2026-05-10T02:48:19.182706+00:00",
+  "metadata": {
+    "algorithm": "catboost",
+    "cv_type": "stratified_kfold",
+    "model_level": "resident",
+    "n_features": 39,
+    "n_splits": 5
+  },
+  "model": "altercation",
+  "n_trials": 10,
+  "objective": "minimize",
+  "objective_metric": "log_loss",
+  "params": {
+    "colsample_bylevel": 0.6387926357773329,
+    "depth": 7,
+    "l2_leaf_reg": 1.5958237752949744,
+    "learning_rate": 0.005611516415334507,
+    "min_data_in_leaf": 6,
+    "random_strength": 1.5599452033620265,
+    "subsample": 0.7587945476302645
+  }
+}
