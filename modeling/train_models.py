@@ -10,8 +10,8 @@ Final model is trained on all pre-holdout data, evaluated on holdout
 (Jan 2025), and compared with an isotonic-calibrated variant.
 
 Targets:
-  - fall_7d, rth_7d  → feature_matrix_7d.parquet  (7-day horizon)
-  - wound_14d        → feature_matrix_14d.parquet (14-day horizon)
+  - fall_7d, rth_7d  → model_matrix_7d.parquet  (7-day horizon)
+  - wound_14d        → model_matrix_14d.parquet (14-day horizon)
 
 Usage:
     cd <project_root>
@@ -20,6 +20,7 @@ Usage:
 
 import warnings
 from datetime import date, timedelta
+from pathlib import Path
 
 import matplotlib
 import matplotlib.pyplot as plt
@@ -30,19 +31,10 @@ import numpy as np
 import pandas as pd
 import polars as pl
 from catboost import CatBoostClassifier
-from pathlib import Path
 from sklearn.calibration import CalibratedClassifierCV, calibration_curve
-from sklearn.metrics import (
-    auc,
-    brier_score_loss,
-    # f1_score,
-    log_loss,
-    precision_recall_curve,
-    # precision_score,
-    # recall_score,
-    roc_auc_score,
-    roc_curve,
-)
+from sklearn.metrics import (auc,  # f1_score,; precision_score,; recall_score,
+                             brier_score_loss, log_loss,
+                             precision_recall_curve, roc_auc_score, roc_curve)
 
 matplotlib.use("Agg")
 warnings.filterwarnings("ignore")
@@ -50,9 +42,10 @@ warnings.filterwarnings("ignore")
 # ─── Configuration ─────────────────────────────────────────────────────────────
 
 ROOT = Path(__file__).resolve().parent.parent
-DATA_7D = ROOT / "data" / "feature_store" / "feature_matrix_7d.parquet"
-DATA_14D = ROOT / "data" / "feature_store" / "feature_matrix_14d.parquet"
+DATA_7D = ROOT / "data" / "processed" / "model_matrix_7d.parquet"
+DATA_14D = ROOT / "data" / "processed" / "model_matrix_14d.parquet"
 ARTIFACTS_DIR = ROOT / "modeling" / "artifacts"
+MLFLOW_TRACKING_DIR = ROOT / "mlruns"
 ARTIFACTS_DIR.mkdir(parents=True, exist_ok=True)
 
 META_COLS = [
@@ -91,6 +84,13 @@ EXPERIMENT_NAME = "incident_prediction"
 MIN_TRAIN_WEEKS = 26  # ~6 months minimum training data
 FOLD_STEP = 4  # every Nth eligible window as a fold boundary (~monthly)
 HOLDOUT_START = date(2025, 1, 1)
+
+
+def configure_mlflow():
+    """Configure a local MLflow file store in a Windows-safe format."""
+    MLFLOW_TRACKING_DIR.mkdir(parents=True, exist_ok=True)
+    mlflow.set_tracking_uri(MLFLOW_TRACKING_DIR.resolve().as_uri())
+    mlflow.set_experiment(EXPERIMENT_NAME)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -583,8 +583,7 @@ def log_calibration_comparison(target, res, target_display):
 
 
 def main():
-    mlflow.set_tracking_uri(f"file://{ROOT / 'mlruns'}")
-    mlflow.set_experiment(EXPERIMENT_NAME)
+    configure_mlflow()
 
     # Cache loaded data per file to avoid re-reading for targets sharing the same matrix
     _data_cache = {}

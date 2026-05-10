@@ -14,7 +14,7 @@ Usage:
     python modeling/train_altercation.py
 """
 
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 
 import matplotlib
@@ -27,14 +27,8 @@ import pandas as pd
 import polars as pl
 from catboost import CatBoostClassifier
 from sklearn.calibration import CalibratedClassifierCV, calibration_curve
-from sklearn.metrics import (
-    auc,
-    brier_score_loss,
-    log_loss,
-    precision_recall_curve,
-    roc_auc_score,
-    roc_curve,
-)
+from sklearn.metrics import (auc, brier_score_loss, log_loss,
+                             precision_recall_curve, roc_auc_score, roc_curve)
 from sklearn.model_selection import StratifiedKFold
 
 matplotlib.use("Agg")
@@ -44,11 +38,19 @@ matplotlib.use("Agg")
 ROOT = Path(__file__).resolve().parent.parent
 RAW = ROOT / "data" / "raw"
 ARTIFACTS_DIR = ROOT / "modeling" / "artifacts"
+MLFLOW_TRACKING_DIR = ROOT / "mlruns"
 ARTIFACTS_DIR.mkdir(parents=True, exist_ok=True)
 
 SIGNAL_END = datetime(2025, 2, 1)
 EXPERIMENT_NAME = "incident_prediction"
 RANDOM_SEED = 42
+
+
+def configure_mlflow():
+    """Configure a local MLflow file store in a Windows-safe format."""
+    MLFLOW_TRACKING_DIR.mkdir(parents=True, exist_ok=True)
+    mlflow.set_tracking_uri(MLFLOW_TRACKING_DIR.resolve().as_uri())
+    mlflow.set_experiment(EXPERIMENT_NAME)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -388,8 +390,7 @@ def main():
     X = df.select(feature_cols).to_pandas()
     y = df[target_col].to_numpy().ravel()
 
-    mlflow.set_tracking_uri(f"file://{ROOT / 'mlruns'}")
-    mlflow.set_experiment(EXPERIMENT_NAME)
+    configure_mlflow()
 
     # ── Stratified 5-Fold CV ─────────────────────────────────────────────────
     print("\n  Phase 1: Stratified 5-Fold CV")

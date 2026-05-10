@@ -15,7 +15,7 @@ Usage:
     python modeling/business_rules.py
 """
 
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 
 import polars as pl

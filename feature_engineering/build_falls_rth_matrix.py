@@ -2,7 +2,11 @@
 Feature Matrix — 7-day Falls & RTH Models
 ==========================================
 
-Generates `data/feature_store/feature_matrix_7d.parquet` with:
+Generates:
+  - `data/feature_store/features_7d.parquet` with target-free features
+  - `data/processed/model_matrix_7d.parquet` with model-ready targets + features
+
+Artifacts use:
   - stride = 7 days (non-overlapping)
   - target fall_7d: any Fall incident in [t, t+7d)
   - target rth_7d: any unplanned hospital transfer in [t, t+7d)
@@ -19,7 +23,7 @@ Feature groups (all point-in-time, data ≤ feature_cutoff = t − 1d):
 
 Usage:
     cd <project_root>
-    python feature_engineering/build_feature_matrix.py
+    python feature_engineering/build_falls_rth_matrix_falls_rts_data.py
 """
 
 from datetime import datetime, timedelta
@@ -31,7 +35,8 @@ import polars as pl
 
 ROOT = Path(__file__).resolve().parent.parent
 RAW = ROOT / "data" / "raw"
-OUT = ROOT / "data" / "feature_store" / "feature_matrix_7d.parquet"
+FEATURE_OUT = ROOT / "data" / "feature_store" / "features_7d.parquet"
+MODEL_OUT = ROOT / "data" / "processed" / "model_matrix_7d.parquet"
 
 SIGNAL_START = datetime(2023, 7, 1)
 SIGNAL_END = datetime(2025, 2, 1)
@@ -594,7 +599,7 @@ def main():
     print("Generating 7-day observation windows...")
     windows = generate_observation_windows(res_bounds)
     print(f"  {windows.shape[0]:,} windows, {windows['resident_id'].n_unique():,} residents")
-    print(f"  Range: {windows['window_start'].min().date()} → {windows['window_end'].max().date()}")
+    print(f"  Range: {windows['window_start'].min().date()} -> {windows['window_end'].max().date()}")
 
     print("Creating labels...")
     obs = create_labels(windows, incidents, transfers)
@@ -645,14 +650,19 @@ def main():
     targets = ["fall_7d", "rth_7d"]
     feat_cols = [c for c in feature_matrix.columns if c not in meta + targets]
 
-    print(f"\n  Shape: {feature_matrix.shape[0]:,} × {feature_matrix.shape[1]}")
+    print(f"\n  Shape: {feature_matrix.shape[0]:,} x {feature_matrix.shape[1]}")
     print(f"  Features: {len(feat_cols)}")
     print(f"  fall_7d rate: {feature_matrix['fall_7d'].mean():.4%}")
     print(f"  rth_7d rate:  {feature_matrix['rth_7d'].mean():.4%}")
 
-    OUT.parent.mkdir(parents=True, exist_ok=True)
-    feature_matrix.write_parquet(OUT)
-    print(f"\n  Saved to {OUT}")
+    features = feature_matrix.select(meta + feat_cols)
+
+    FEATURE_OUT.parent.mkdir(parents=True, exist_ok=True)
+    MODEL_OUT.parent.mkdir(parents=True, exist_ok=True)
+    features.write_parquet(FEATURE_OUT)
+    feature_matrix.write_parquet(MODEL_OUT)
+    print(f"\n  Saved target-free features to {FEATURE_OUT}")
+    print(f"  Saved model matrix to {MODEL_OUT}")
 
 
 if __name__ == "__main__":

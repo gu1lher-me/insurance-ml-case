@@ -183,8 +183,8 @@ A potentially elegant pattern:
 
 ```
 1. Feature Engineering (resident × 7-day window for H1/H2, 14-day for H3)
-   ├── Script: feature_engineering/build_feature_matrix.py  → feature_matrix_7d.parquet (H1, H2)
-   ├── Script: feature_engineering/build_wound_matrix.py    → feature_matrix_14d.parquet (H3)
+   ├── Script: feature_engineering/build_falls_rth_matrix.py → features_7d.parquet + model_matrix_7d.parquet (H1, H2)
+   ├── Script: feature_engineering/build_wound_matrix.py     → features_14d.parquet + model_matrix_14d.parquet (H3)
    │
    ├── Demographics: age, stay_duration, facility_id, admission_status
    ├── Diagnoses: ICD-10 chapter flags, specific fall-risk & RTH-risk codes
@@ -484,7 +484,7 @@ New residents (admitted in the last 7 days) have:
 
 | Component | Script | Status |
 |---|---|---|
-| Feature matrix — 7d (falls, RTH) | `feature_engineering/build_feature_matrix.py` | ✅ Done |
+| Feature matrix — 7d (falls, RTH) | `feature_engineering/build_falls_rth_matrix_falls_rts_data.py` | ✅ Done |
 | Feature matrix — 14d (wounds) | `feature_engineering/build_wound_matrix.py` | ✅ Done || Tier 1 ML models (H1, H2, H3) | `modeling/train_models.py` | ✅ Done |
 | H4 — Altercation classifier | `modeling/train_altercation.py` | ✅ Done |
 | Tier 3 — Business rules | `modeling/business_rules.py` | ✅ Done |
@@ -497,8 +497,8 @@ New residents (admitted in the last 7 days) have:
 
 | Matrix | File | Rows | Features | Positive Rate |
 |---|---|---|---|---|
-| 7-day windows | `data/feature_store/feature_matrix_7d.parquet` | 66,312 | 211 | fall_7d: 2.4%, rth_7d: 0.8% |
-| 14-day windows | `data/feature_store/feature_matrix_14d.parquet` | 32,361 | 211 | wound_14d: 1.31% |
+| 7-day windows | `data/processed/model_matrix_7d.parquet` | 66,312 | 211 | fall_7d: 2.4%, rth_7d: 0.8% |
+| 14-day windows | `data/processed/model_matrix_14d.parquet` | 32,361 | 211 | wound_14d: 1.31% |
 
 **Key implementation details:**
 - **Embargo period:** 1 day between last feature data and prediction window start (prevents entry-lag leakage)

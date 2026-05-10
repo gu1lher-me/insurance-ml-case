@@ -1,0 +1,8 @@
+.venv
+mlruns/
+.env
+*.parquet
+*.csv
+mlflow.db
+*/__pycache__/
+artifacts/
