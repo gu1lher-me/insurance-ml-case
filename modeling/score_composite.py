@@ -22,8 +22,8 @@ import mlflow
 import mlflow.catboost
 import mlflow.sklearn
 import numpy as np
-import pandas as pd
 import polars as pl
+from mlflow.tracking import MlflowClient
 
 from modeling.business_policy import (
     ALTERCATION_7D_BASE_RATE_FALLBACK,
@@ -142,8 +142,13 @@ def load_scoring_spine(
 
 def _latest_mlflow_model(target: str, calibrated: bool = True, phase: str = DEFAULT_MODEL_PHASE):
     configure_mlflow()
-    runs = mlflow.search_runs(
-        experiment_names=["incident_prediction"],
+    client = MlflowClient()
+    experiment = client.get_experiment_by_name("incident_prediction")
+    if experiment is None:
+        raise FileNotFoundError(f"No MLflow experiment found for {target}")
+
+    runs = client.search_runs(
+        experiment_ids=[experiment.experiment_id],
         filter_string=(
             f"tags.target = '{target}' and tags.phase = '{phase}' "
             f"and tags.calibrated = '{str(calibrated).lower()}'"
@@ -151,10 +156,10 @@ def _latest_mlflow_model(target: str, calibrated: bool = True, phase: str = DEFA
         order_by=["attributes.start_time DESC"],
         max_results=1,
     )
-    if runs.empty:
+    if not runs:
         raise FileNotFoundError(f"No MLflow {phase} model found for {target}")
 
-    run_id = runs.iloc[0]["run_id"]
+    run_id = runs[0].info.run_id
     model_uri = f"runs:/{run_id}/model"
     if calibrated:
         return mlflow.sklearn.load_model(model_uri), run_id
@@ -205,7 +210,7 @@ def score_tier1_models(
         else:
             model, model_feature_cols = _train_tier1_model(target)
 
-        X_score = score_df.select(model_feature_cols).to_pandas()
+        X_score = score_df.select(model_feature_cols)
         probabilities = model.predict_proba(X_score)[:, 1]
         out = out.join(
             pl.DataFrame(
@@ -302,7 +307,7 @@ def score_altercation_as_of(
         signal_end=cutoff,
     )
 
-    X = df.select(feature_cols).to_pandas()
+    X = df.select(feature_cols)
     y = df[target_col].to_numpy().ravel()
 
     if model_phase == "production_model":
@@ -408,7 +413,6 @@ def add_composite_costs(scored: pl.DataFrame) -> pl.DataFrame:
 
 
 def add_reason_codes(scored: pl.DataFrame) -> pl.DataFrame:
-    df = scored.to_pandas()
     contribution_cols = {
         "fall": "fall_expected_cost",
         "rth": "rth_expected_cost",
@@ -425,11 +429,18 @@ def add_reason_codes(scored: pl.DataFrame) -> pl.DataFrame:
 
     reason_codes = []
     top_reason = []
-    for _, row in df.iterrows():
+
+    def _positive_value(value) -> float:
+        if value is None:
+            return 0.0
+        value = float(value)
+        return value if np.isfinite(value) else 0.0
+
+    for row in scored.iter_rows(named=True):
         contributions = [
-            (event_type, float(row[col]))
+            (event_type, _positive_value(row[col]))
             for event_type, col in contribution_cols.items()
-            if float(row[col]) > 0
+            if _positive_value(row[col]) > 0
         ]
         contributions.sort(key=lambda item: item[1], reverse=True)
 
@@ -444,13 +455,13 @@ def add_reason_codes(scored: pl.DataFrame) -> pl.DataFrame:
         reason_codes.append("|".join(dict.fromkeys(reasons)))
         top_reason.append(contributions[0][0] if contributions else "")
 
-    df["reason_codes"] = reason_codes
-    df["top_reason"] = top_reason
-    return pl.from_pandas(df)
+    return scored.with_columns(
+        pl.Series("reason_codes", reason_codes),
+        pl.Series("top_reason", top_reason),
+    )
 
 
 def add_recommended_actions(scored: pl.DataFrame) -> pl.DataFrame:
-    df = scored.to_pandas()
     action_map = {
         "fall": "Fall-prevention review: reassess mobility, toileting plan, assistive devices, and recent vitals.",
         "rth": "Clinical escalation review: evaluate acute-change signs, recent transfers, abnormal labs, and provider follow-up.",
@@ -461,7 +472,7 @@ def add_recommended_actions(scored: pl.DataFrame) -> pl.DataFrame:
     }
 
     actions = []
-    for _, row in df.iterrows():
+    for row in scored.iter_rows(named=True):
         reasons = str(row.get("reason_codes", "")).split("|")
         ordered_events = []
         for reason in reasons:
@@ -476,8 +487,7 @@ def add_recommended_actions(scored: pl.DataFrame) -> pl.DataFrame:
 
         actions.append(" | ".join(action_map[event] for event in ordered_events[:3]))
 
-    df["recommended_actions"] = actions
-    return pl.from_pandas(df)
+    return scored.with_columns(pl.Series("recommended_actions", actions))
 
 
 def build_composite_scores(

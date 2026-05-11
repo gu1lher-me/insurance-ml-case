@@ -34,7 +34,6 @@ import mlflow
 import mlflow.catboost
 import mlflow.sklearn
 import numpy as np
-import pandas as pd
 import polars as pl
 import optuna
 from catboost import CatBoostClassifier
@@ -286,7 +285,7 @@ def plot_calibration_comparison(results, y_true, title):
 def plot_cv_metric_over_time(fold_df, metric, title):
     """Line chart of a CV metric across fold boundaries."""
     fig, ax = plt.subplots(figsize=(10, 5))
-    ax.plot(range(len(fold_df)), fold_df[metric], "o-", lw=1.5, markersize=5)
+    ax.plot(range(len(fold_df)), fold_df[metric].to_list(), "o-", lw=1.5, markersize=5)
     mean_val = fold_df[metric].mean()
     ax.axhline(mean_val, color="red", ls="--", lw=1, label=f"Mean = {mean_val:.4f}")
     ax.set(
@@ -296,7 +295,7 @@ def plot_cv_metric_over_time(fold_df, metric, title):
     )
     ax.set_xticks(range(len(fold_df)))
     ax.set_xticklabels(
-        [str(b)[:10] for b in fold_df["boundary"]], rotation=45, ha="right"
+        [str(b)[:10] for b in fold_df["boundary"].to_list()], rotation=45, ha="right"
     )
     ax.legend()
     ax.grid(True, alpha=0.3)
@@ -344,9 +343,9 @@ def tune_temporal_hyperparameters(df, target, feature_cols, horizon_days, n_tria
             if test_df.shape[0] == 0:
                 continue
 
-            X_train = train_df.select(feature_cols).to_pandas()
+            X_train = train_df.select(feature_cols)
             y_train = train_df[target].to_numpy().ravel()
-            X_test = test_df.select(feature_cols).to_pandas()
+            X_test = test_df.select(feature_cols)
             y_test = test_df[target].to_numpy().ravel()
 
             if len(np.unique(y_train)) < 2:
@@ -408,9 +407,9 @@ def run_expanding_cv(df, target, feature_cols, horizon_days, model_params=None):
         if test_df.shape[0] == 0:
             continue
 
-        X_train = train_df.select(feature_cols).to_pandas()
+        X_train = train_df.select(feature_cols)
         y_train = train_df[target].to_numpy().ravel()
-        X_test = test_df.select(feature_cols).to_pandas()
+        X_test = test_df.select(feature_cols)
         y_test = test_df[target].to_numpy().ravel()
 
         n_pos = int(y_test.sum())
@@ -442,7 +441,7 @@ def run_expanding_cv(df, target, feature_cols, horizon_days, model_params=None):
             f"pos={n_pos}  ROC-AUC={metrics['roc_auc']:.4f}"
         )
 
-    fold_df = pd.DataFrame(fold_records)
+    fold_df = pl.DataFrame(fold_records)
     pooled_metrics = compute_metrics(np.array(all_y_true), np.array(all_y_prob))
 
     return fold_df, pooled_metrics
@@ -461,9 +460,9 @@ def train_final_model(df, target, feature_cols, model_params=None):
     train_df = df.filter(pl.col("window_end") <= HOLDOUT_START)
     holdout_df = df.filter(pl.col("window_start") >= HOLDOUT_START)
 
-    X_train = train_df.select(feature_cols).to_pandas()
+    X_train = train_df.select(feature_cols)
     y_train = train_df[target].to_numpy().ravel()
-    X_holdout = holdout_df.select(feature_cols).to_pandas()
+    X_holdout = holdout_df.select(feature_cols)
     y_holdout = holdout_df[target].to_numpy().ravel()
 
     # Uncalibrated
@@ -551,7 +550,7 @@ def log_cv_run(
 
         # Fold detail CSV
         fold_csv_path = ARTIFACTS_DIR / f"{target}_cv_fold_metrics.csv"
-        fold_df.to_csv(fold_csv_path, index=False)
+        fold_df.write_csv(fold_csv_path)
         mlflow.log_artifact(str(fold_csv_path))
 
         # ROC-AUC over time
@@ -616,16 +615,14 @@ def log_final_uncalibrated(target, res, feature_cols, target_display, model_para
 
         # Feature importance (full CSV)
         fi_df = (
-            pd.DataFrame(
-                {"feature": feature_cols, "importance": res["importances"]}
-            )
-            .sort_values("importance", ascending=False, key=np.abs)
-            .reset_index(drop=True)
+            pl.DataFrame({"feature": feature_cols, "importance": res["importances"]})
+            .with_columns(pl.col("importance").abs().alias("_abs_importance"))
+            .sort("_abs_importance", descending=True)
+            .with_row_index("rank", offset=1)
+            .drop("_abs_importance")
         )
-        fi_df.index = fi_df.index + 1
-        fi_df.index.name = "rank"
         fi_path = ARTIFACTS_DIR / f"{target}_catboost_feature_importance.csv"
-        fi_df.to_csv(fi_path)
+        fi_df.write_csv(fi_path)
         mlflow.log_artifact(str(fi_path))
 
         # Model artifact

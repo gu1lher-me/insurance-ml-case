@@ -377,8 +377,8 @@ expected_avoidable_cost = composite_expected_cost * 0.20
 
 This 20% baseline is not a learned causal estimate. It is a simple POC
 assumption chosen to avoid false precision across incident types. The backtest
-also reports sensitivity at 10%, 15%, 20%, and 25%; incident-specific
-effectiveness should only be added after a prospective pilot measures it.
+also reports sensitivity at 15%, 20%, and 25%; incident-specific effectiveness
+should only be added after a prospective pilot measures it.
 
 The default economic action rule is:
 
@@ -430,7 +430,6 @@ Primary policy effectiveness sensitivity:
 
 | Assumed effectiveness | Alerts | Captured claim cost | Avoided claim cost | Intervention cost | Net savings | ROI |
 |---:|---:|---:|---:|---:|---:|---:|
-| 10% | 401 | USD 304,500 | USD 30,450 | USD 40,100 | -USD 9,650 | -0.24x |
 | 15% | 401 | USD 304,500 | USD 45,675 | USD 40,100 | USD 5,575 | 0.14x |
 | 20% | 401 | USD 304,500 | USD 60,900 | USD 40,100 | USD 20,800 | 0.52x |
 | 25% | 401 | USD 304,500 | USD 76,125 | USD 40,100 | USD 36,025 | 0.90x |
@@ -453,6 +452,16 @@ The current system is validated in backtest. To move to production, consider:
 - Measure actual incidents, claims, and facility engagement rates
 - Use difference-in-differences or causal forest to account for facility baseline risk and resident mix
 - Decision: roll out to full portfolio or refine model based on pilot results
+
+### Feature Explainability
+- Add feature-level explanations for each ML model, likely using Shapley values through SHAP or CatBoost's native SHAP support
+- Surface top positive risk drivers in the resident action queue so facility teams can see why a resident was prioritized
+- Validate explanations with clinical users before using them in workflow design
+
+This was not implemented in the POC because the priority was to build a
+leakage-safe prediction and financial backtest pipeline first. It is an
+important next step before production deployment because actionability depends
+on both risk ranking and understandable reasons.
 
 ### Cloud Deployment
 - Containerize the training and scoring pipelines (Docker)
@@ -527,7 +536,7 @@ uv run python modeling\backtest_financials.py `
   --scores-path data\scored\composite_scores_holdout.parquet `
   --alert-cost 100 `
   --intervention-effectiveness 0.20 `
-  --effectiveness-sensitivity 0.10 0.15 0.20 0.25
+  --effectiveness-sensitivity 0.15 0.20 0.25
 ```
 
 ## Daily Scoring

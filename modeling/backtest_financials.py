@@ -10,20 +10,18 @@ from __future__ import annotations
 import argparse
 import math
 import sys
-from datetime import timedelta
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-import pandas as pd
 import polars as pl
 
 from modeling.business_policy import (
-    DEFAULT_INTERVENTION_EFFECTIVENESS,
     DEFAULT_ALERT_REVIEW_COST,
     DEFAULT_CAPACITY_RATES,
+    DEFAULT_INTERVENTION_EFFECTIVENESS,
     EVENT_LABELS,
     INTERVENTION_EFFECTIVENESS_SENSITIVITY,
     PolicyAssumptions,
@@ -85,7 +83,28 @@ def _fmt_pct(value: float) -> str:
     return f"{value:.1%}"
 
 
-def load_scores(path: Path, score_if_missing: bool) -> pd.DataFrame:
+def _sum(df: pl.DataFrame, column: str) -> float:
+    if df.is_empty() or column not in df.columns:
+        return 0.0
+    value = df[column].sum()
+    return float(value) if value is not None else 0.0
+
+
+def _min(df: pl.DataFrame, column: str) -> float:
+    if df.is_empty() or column not in df.columns:
+        return 0.0
+    value = df[column].min()
+    return float(value) if value is not None else 0.0
+
+
+def _median(df: pl.DataFrame, column: str) -> float:
+    if df.is_empty() or column not in df.columns:
+        return 0.0
+    value = df[column].median()
+    return float(value) if value is not None else 0.0
+
+
+def load_scores(path: Path, score_if_missing: bool) -> pl.DataFrame:
     if not path.exists():
         if not score_if_missing:
             raise FileNotFoundError(
@@ -96,184 +115,201 @@ def load_scores(path: Path, score_if_missing: bool) -> pd.DataFrame:
         path.parent.mkdir(parents=True, exist_ok=True)
         scored.write_parquet(path)
 
-    scores = pl.read_parquet(path).to_pandas()
-    for col in ["window_start", "window_end", "feature_cutoff"]:
-        scores[col] = pd.to_datetime(scores[col])
-    return scores
+    return pl.read_parquet(path)
 
 
-def select_top_by_facility(scores: pd.DataFrame, capacity_rate: float) -> pd.Series:
-    selected = pd.Series(False, index=scores.index)
-    for _, group in scores.groupby("facility_id", sort=False):
-        n_select = max(1, int(math.ceil(len(group) * capacity_rate)))
-        chosen = group.sort_values("composite_expected_cost", ascending=False).head(n_select)
-        selected.loc[chosen.index] = True
-    return selected
+def select_top_by_facility(scores: pl.DataFrame, capacity_rate: float) -> pl.DataFrame:
+    selected = []
+    for group in scores.partition_by("facility_id", maintain_order=True):
+        n_select = max(1, int(math.ceil(group.height * capacity_rate)))
+        selected.append(group.sort("composite_expected_cost", descending=True).head(n_select))
+    return pl.concat(selected, how="vertical") if selected else scores.head(0)
 
 
-def policy_masks(scores: pd.DataFrame, assumptions: PolicyAssumptions) -> dict[str, pd.Series]:
-    masks = {}
+def policy_alerts(
+    scores: pl.DataFrame,
+    assumptions: PolicyAssumptions,
+) -> dict[str, pl.DataFrame]:
+    alerts = {}
     for rate in assumptions.capacity_rates:
         label = f"top_{int(rate * 100):02d}pct_per_facility"
-        masks[label] = select_top_by_facility(scores, rate)
-    masks["economic_threshold"] = (
-        scores["composite_expected_cost"] * assumptions.intervention_effectiveness
+        alerts[label] = select_top_by_facility(scores, rate)
+    alerts["economic_threshold"] = scores.filter(
+        pl.col("composite_expected_cost") * assumptions.intervention_effectiveness
         >= assumptions.alert_review_cost
     )
-    return masks
+    return alerts
 
 
-def captured_events(alerts: pd.DataFrame, events: pd.DataFrame) -> pd.DataFrame:
-    if alerts.empty or events.empty:
-        return pd.DataFrame(columns=list(events.columns) + ["score_id", "alert_window_start"])
-
-    candidate = alerts[
-        [
-            "score_id",
-            "resident_id",
-            "facility_id",
-            "window_start",
-            "composite_expected_cost",
-            "expected_avoidable_cost",
-            "top_reason",
-            "reason_codes",
-        ]
-    ].merge(events, on="resident_id", how="inner", suffixes=("_alert", "_event"))
-
-    candidate["capture_end"] = candidate.apply(
-        lambda row: row["window_start"] + timedelta(days=int(row["horizon_days"])),
-        axis=1,
+def _empty_captured_events(events: pl.DataFrame) -> pl.DataFrame:
+    schema = dict(events.schema)
+    schema.update(
+        {
+            "score_id": pl.UInt32,
+            "composite_expected_cost": pl.Float64,
+            "expected_avoidable_cost": pl.Float64,
+            "top_reason": pl.Utf8,
+            "reason_codes": pl.Utf8,
+            "alert_window_start": pl.Datetime("us"),
+        }
     )
-    candidate = candidate[
-        (candidate["event_time"] >= candidate["window_start"])
-        & (candidate["event_time"] < candidate["capture_end"])
-    ].copy()
+    return pl.DataFrame(schema=schema)
 
-    if candidate.empty:
-        return candidate
 
-    candidate = candidate.sort_values(["event_id", "event_type", "window_start"])
-    candidate = candidate.drop_duplicates(["event_id", "event_type"], keep="first")
-    candidate = candidate.rename(columns={"window_start": "alert_window_start"})
+def captured_events(alerts: pl.DataFrame, events: pl.DataFrame) -> pl.DataFrame:
+    if alerts.is_empty() or events.is_empty():
+        return _empty_captured_events(events)
+
+    candidate = (
+        alerts.select(
+            [
+                "score_id",
+                "resident_id",
+                "facility_id",
+                "window_start",
+                "composite_expected_cost",
+                "expected_avoidable_cost",
+                "top_reason",
+                "reason_codes",
+            ]
+        )
+        .join(events, on="resident_id", how="inner", suffix="_event")
+        .with_columns(
+            capture_end=pl.col("window_start")
+            + pl.duration(days=pl.col("horizon_days"))
+        )
+        .filter(
+            (pl.col("event_time") >= pl.col("window_start"))
+            & (pl.col("event_time") < pl.col("capture_end"))
+        )
+        .sort(["event_id", "event_type", "window_start"])
+        .unique(["event_id", "event_type"], keep="first", maintain_order=True)
+        .rename({"window_start": "alert_window_start"})
+        .drop("capture_end")
+    )
     return candidate
 
 
 def summarize_policy(
     policy_name: str,
-    scores: pd.DataFrame,
-    selected: pd.Series,
-    events: pd.DataFrame,
+    scores: pl.DataFrame,
+    alerts: pl.DataFrame,
+    events: pl.DataFrame,
     assumptions: PolicyAssumptions,
-) -> tuple[dict[str, float], pd.DataFrame]:
-    alerts = scores[selected].copy()
-    captured = captured_events(alerts, events)
-
-    if not captured.empty:
-        captured["intervention_effectiveness"] = assumptions.intervention_effectiveness
-        captured["estimated_avoided_claim_cost"] = (
-            captured["claim_cost"] * assumptions.intervention_effectiveness
-        )
-        captured["estimated_prevented_events"] = assumptions.intervention_effectiveness
-    else:
-        captured["intervention_effectiveness"] = []
-        captured["estimated_avoided_claim_cost"] = []
-        captured["estimated_prevented_events"] = []
-
-    intervention_cost = len(alerts) * assumptions.alert_review_cost
-    captured_claim_cost = float(captured["claim_cost"].sum()) if not captured.empty else 0.0
-    avoided_claim_cost = (
-        float(captured["estimated_avoided_claim_cost"].sum()) if not captured.empty else 0.0
+) -> tuple[dict[str, float], pl.DataFrame]:
+    captured = captured_events(alerts, events).with_columns(
+        pl.lit(assumptions.intervention_effectiveness).alias("intervention_effectiveness"),
+        (pl.col("claim_cost") * assumptions.intervention_effectiveness).alias(
+            "estimated_avoided_claim_cost"
+        ),
+        pl.lit(assumptions.intervention_effectiveness).alias("estimated_prevented_events"),
     )
-    total_claim_cost = float(events["claim_cost"].sum()) if not events.empty else 0.0
-    net_savings = avoided_claim_cost - intervention_cost
 
-    if len(alerts) > 0:
-        min_threshold = float(alerts["composite_expected_cost"].min())
-        median_threshold = float(alerts["composite_expected_cost"].median())
-    else:
-        min_threshold = 0.0
-        median_threshold = 0.0
+    intervention_cost = alerts.height * assumptions.alert_review_cost
+    captured_claim_cost = _sum(captured, "claim_cost")
+    avoided_claim_cost = _sum(captured, "estimated_avoided_claim_cost")
+    total_claim_cost = _sum(events, "claim_cost")
+    net_savings = avoided_claim_cost - intervention_cost
 
     summary = {
         "policy": policy_name,
-        "scored_windows": len(scores),
-        "alerts": len(alerts),
-        "alert_rate": len(alerts) / len(scores) if len(scores) else 0.0,
-        "alerted_residents": alerts["resident_id"].nunique() if len(alerts) else 0,
-        "threshold_min_composite_expected_cost": min_threshold,
-        "threshold_median_composite_expected_cost": median_threshold,
-        "expected_claim_cost_alerted": float(alerts["composite_expected_cost"].sum()),
-        "expected_avoidable_cost_alerted": float(
-            alerts["composite_expected_cost"].sum() * assumptions.intervention_effectiveness
+        "scored_windows": scores.height,
+        "alerts": alerts.height,
+        "alert_rate": alerts.height / scores.height if scores.height else 0.0,
+        "alerted_residents": alerts["resident_id"].n_unique() if alerts.height else 0,
+        "threshold_min_composite_expected_cost": _min(alerts, "composite_expected_cost"),
+        "threshold_median_composite_expected_cost": _median(
+            alerts, "composite_expected_cost"
         ),
-        "actual_events": len(events),
+        "expected_claim_cost_alerted": _sum(alerts, "composite_expected_cost"),
+        "expected_avoidable_cost_alerted": _sum(alerts, "composite_expected_cost")
+        * assumptions.intervention_effectiveness,
+        "actual_events": events.height,
         "actual_claim_cost": total_claim_cost,
-        "captured_events": len(captured),
+        "captured_events": captured.height,
         "captured_claim_cost": captured_claim_cost,
         "claim_cost_capture_rate": captured_claim_cost / total_claim_cost
         if total_claim_cost
         else 0.0,
-        "estimated_prevented_events": float(captured["estimated_prevented_events"].sum())
-        if not captured.empty
-        else 0.0,
+        "estimated_prevented_events": _sum(captured, "estimated_prevented_events"),
         "estimated_avoided_claim_cost": avoided_claim_cost,
         "intervention_cost": intervention_cost,
         "estimated_net_savings": net_savings,
         "estimated_roi": net_savings / intervention_cost if intervention_cost else 0.0,
         "intervention_effectiveness": assumptions.intervention_effectiveness,
     }
-    captured["policy"] = policy_name
-    return summary, captured
+    return summary, captured.with_columns(pl.lit(policy_name).alias("policy"))
 
 
-def summarize_by_type(events: pd.DataFrame, captured_all: pd.DataFrame) -> pd.DataFrame:
-    total = (
-        events.groupby("event_type")
-        .agg(actual_events=("event_id", "count"), actual_claim_cost=("claim_cost", "sum"))
-        .reset_index()
+def _empty_by_type() -> pl.DataFrame:
+    return pl.DataFrame(
+        schema={
+            "policy": pl.Utf8,
+            "event_type": pl.Utf8,
+            "actual_events": pl.UInt32,
+            "actual_claim_cost": pl.Float64,
+            "captured_events": pl.UInt32,
+            "captured_claim_cost": pl.Float64,
+            "event_capture_rate": pl.Float64,
+            "claim_cost_capture_rate": pl.Float64,
+            "estimated_avoided_claim_cost": pl.Float64,
+        }
     )
-    if captured_all.empty:
-        captured = pd.DataFrame(
-            columns=[
-                "policy",
-                "event_type",
-                "captured_events",
-                "captured_claim_cost",
-                "estimated_avoided_claim_cost",
-            ]
+
+
+def summarize_by_type(events: pl.DataFrame, captured_all: pl.DataFrame) -> pl.DataFrame:
+    if events.is_empty():
+        return _empty_by_type()
+
+    total = events.group_by("event_type").agg(
+        pl.len().alias("actual_events"),
+        pl.col("claim_cost").sum().alias("actual_claim_cost"),
+    )
+
+    if captured_all.is_empty():
+        policies = ["none"]
+        captured = pl.DataFrame(
+            schema={
+                "policy": pl.Utf8,
+                "event_type": pl.Utf8,
+                "captured_events": pl.UInt32,
+                "captured_claim_cost": pl.Float64,
+                "estimated_avoided_claim_cost": pl.Float64,
+            }
         )
     else:
-        captured = (
-            captured_all.groupby(["policy", "event_type"])
-            .agg(
-                captured_events=("event_id", "count"),
-                captured_claim_cost=("claim_cost", "sum"),
-                estimated_avoided_claim_cost=("estimated_avoided_claim_cost", "sum"),
-            )
-            .reset_index()
+        captured = captured_all.group_by(["policy", "event_type"]).agg(
+            pl.len().alias("captured_events"),
+            pl.col("claim_cost").sum().alias("captured_claim_cost"),
+            pl.col("estimated_avoided_claim_cost")
+            .sum()
+            .alias("estimated_avoided_claim_cost"),
         )
+        policies = captured["policy"].unique().to_list()
 
     rows = []
-    policies = captured["policy"].unique().tolist()
-    if not policies:
-        policies = ["none"]
-
+    fill_cols = [
+        "captured_events",
+        "captured_claim_cost",
+        "estimated_avoided_claim_cost",
+    ]
     for policy in policies:
-        policy_captured = captured[captured["policy"] == policy]
-        merged = total.merge(policy_captured, on="event_type", how="left")
-        merged["policy"] = policy
-        merged[
-            ["captured_events", "captured_claim_cost", "estimated_avoided_claim_cost"]
-        ] = merged[
-            ["captured_events", "captured_claim_cost", "estimated_avoided_claim_cost"]
-        ].fillna(0)
-        merged["event_capture_rate"] = merged["captured_events"] / merged["actual_events"]
-        merged["claim_cost_capture_rate"] = (
-            merged["captured_claim_cost"] / merged["actual_claim_cost"]
+        policy_captured = captured.filter(pl.col("policy") == policy).drop(
+            "policy", strict=False
+        )
+        merged = (
+            total.join(policy_captured, on="event_type", how="left")
+            .with_columns(pl.lit(policy).alias("policy"))
+            .with_columns([pl.col(c).fill_null(0) for c in fill_cols])
+            .with_columns(
+                event_capture_rate=pl.col("captured_events") / pl.col("actual_events"),
+                claim_cost_capture_rate=pl.col("captured_claim_cost")
+                / pl.col("actual_claim_cost"),
+            )
         )
         rows.append(merged)
 
-    return pd.concat(rows, ignore_index=True)[
+    return pl.concat(rows, how="vertical").select(
         [
             "policy",
             "event_type",
@@ -285,24 +321,26 @@ def summarize_by_type(events: pd.DataFrame, captured_all: pd.DataFrame) -> pd.Da
             "claim_cost_capture_rate",
             "estimated_avoided_claim_cost",
         ]
-    ]
+    )
 
 
 def write_report(
-    summary: pd.DataFrame,
-    by_type: pd.DataFrame,
-    scores: pd.DataFrame,
+    summary: pl.DataFrame,
+    by_type: pl.DataFrame,
+    scores: pl.DataFrame,
     assumptions: PolicyAssumptions,
-    effectiveness_sensitivity: pd.DataFrame,
+    effectiveness_sensitivity: pl.DataFrame,
 ) -> None:
     primary_policy = "top_10pct_per_facility"
-    primary = summary[summary["policy"] == primary_policy]
-    if primary.empty:
-        primary = summary.iloc[[0]]
-    row = primary.iloc[0]
+    primary = summary.filter(pl.col("policy") == primary_policy)
+    if primary.is_empty():
+        primary = summary.head(1)
+    row = primary.row(0, named=True)
 
-    primary_by_type = by_type[by_type["policy"] == row["policy"]].copy()
-    primary_by_type["label"] = primary_by_type["event_type"].map(EVENT_LABELS)
+    primary_by_type = (
+        by_type.filter(pl.col("policy") == row["policy"])
+        .with_columns(pl.col("event_type").replace(EVENT_LABELS).alias("label"))
+    )
 
     lines = [
         "# Composite Risk Score Backtest Results",
@@ -338,7 +376,7 @@ def write_report(
         "|---|---:|---:|---:|---:|---:|---:|",
     ]
 
-    for _, s in summary.iterrows():
+    for s in summary.iter_rows(named=True):
         lines.append(
             f"| `{s['policy']}` | {int(s['alerts']):,} | "
             f"{_fmt_money(s['captured_claim_cost'])} | "
@@ -348,9 +386,9 @@ def write_report(
             f"{s['estimated_roi']:.2f}x |"
         )
 
-    primary_effectiveness = effectiveness_sensitivity[
-        effectiveness_sensitivity["policy"] == row["policy"]
-    ].copy()
+    primary_effectiveness = effectiveness_sensitivity.filter(
+        pl.col("policy") == row["policy"]
+    )
     lines.extend(
         [
             "",
@@ -360,7 +398,7 @@ def write_report(
             "|---:|---:|---:|---:|---:|---:|---:|",
         ]
     )
-    for _, s in primary_effectiveness.sort_values("intervention_effectiveness").iterrows():
+    for s in primary_effectiveness.sort("intervention_effectiveness").iter_rows(named=True):
         lines.append(
             f"| {_fmt_pct(s['intervention_effectiveness'])} | "
             f"{int(s['alerts']):,} | "
@@ -380,7 +418,7 @@ def write_report(
             "|---|---:|---:|---:|---:|",
         ]
     )
-    for _, s in primary_by_type.sort_values("actual_claim_cost", ascending=False).iterrows():
+    for s in primary_by_type.sort("actual_claim_cost", descending=True).iter_rows(named=True):
         lines.append(
             f"| {s['label']} | {int(s['actual_events']):,} | "
             f"{int(s['captured_events']):,} | {_fmt_money(s['captured_claim_cost'])} | "
@@ -405,48 +443,44 @@ def write_report(
     REPORT_PATH.write_text("\n".join(lines), encoding="utf-8")
 
 
-def load_events_for_scores(scores: pd.DataFrame) -> pd.DataFrame:
+def load_events_for_scores(scores: pl.DataFrame) -> pl.DataFrame:
     event_start = scores["window_start"].min()
     event_end = scores["window_end"].max()
-    events = build_actual_event_table(start=event_start, end=event_end).to_pandas()
-    if not events.empty:
-        events["event_time"] = pd.to_datetime(events["event_time"])
-    return events
+    return build_actual_event_table(start=event_start, end=event_end)
 
 
 def run_backtest(
-    scores: pd.DataFrame,
+    scores: pl.DataFrame,
     assumptions: PolicyAssumptions,
-    events: pd.DataFrame | None = None,
-) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    events: pl.DataFrame | None = None,
+) -> tuple[pl.DataFrame, pl.DataFrame, pl.DataFrame]:
     if events is None:
         events = load_events_for_scores(scores)
+
     summaries = []
     captured_frames = []
-    for policy_name, selected in policy_masks(scores, assumptions).items():
+    for policy_name, alerts in policy_alerts(scores, assumptions).items():
         summary, captured = summarize_policy(
-            policy_name, scores, selected, events, assumptions
+            policy_name, scores, alerts, events, assumptions
         )
         summaries.append(summary)
-        if not captured.empty:
+        if not captured.is_empty():
             captured_frames.append(captured)
 
-    summary_df = pd.DataFrame(summaries)
+    summary_df = pl.DataFrame(summaries)
     captured_all = (
-        pd.concat(captured_frames, ignore_index=True)
-        if captured_frames
-        else pd.DataFrame()
+        pl.concat(captured_frames, how="vertical") if captured_frames else _empty_captured_events(events)
     )
     by_type = summarize_by_type(events, captured_all)
     return summary_df, by_type, captured_all
 
 
 def run_effectiveness_sensitivity(
-    scores: pd.DataFrame,
+    scores: pl.DataFrame,
     alert_review_cost: float,
     rates: tuple[float, ...],
-    events: pd.DataFrame,
-) -> pd.DataFrame:
+    events: pl.DataFrame,
+) -> pl.DataFrame:
     frames = []
     for rate in rates:
         assumptions = PolicyAssumptions(
@@ -456,14 +490,16 @@ def run_effectiveness_sensitivity(
         )
         summary, _, _ = run_backtest(scores, assumptions, events)
         frames.append(summary)
-    return pd.concat(frames, ignore_index=True)
+    return pl.concat(frames, how="vertical")
 
 
 def main() -> None:
     args = parse_args()
     sensitivity_rates = tuple(args.effectiveness_sensitivity)
     if args.intervention_effectiveness not in sensitivity_rates:
-        sensitivity_rates = tuple(sorted((*sensitivity_rates, args.intervention_effectiveness)))
+        sensitivity_rates = tuple(
+            sorted((*sensitivity_rates, args.intervention_effectiveness))
+        )
 
     assumptions = PolicyAssumptions(
         alert_review_cost=args.alert_cost,
@@ -482,13 +518,15 @@ def main() -> None:
         events,
     )
 
-    summary.to_csv(SUMMARY_PATH, index=False)
-    by_type.to_csv(BY_TYPE_PATH, index=False)
-    captured.to_csv(CAPTURED_EVENTS_PATH, index=False)
-    effectiveness_sensitivity.to_csv(EFFECTIVENESS_SENSITIVITY_PATH, index=False)
+    summary.write_csv(SUMMARY_PATH)
+    by_type.write_csv(BY_TYPE_PATH)
+    captured.write_csv(CAPTURED_EVENTS_PATH)
+    effectiveness_sensitivity.write_csv(EFFECTIVENESS_SENSITIVITY_PATH)
     write_report(summary, by_type, scores, assumptions, effectiveness_sensitivity)
 
-    primary = summary[summary["policy"] == "top_10pct_per_facility"].iloc[0]
+    primary = summary.filter(pl.col("policy") == "top_10pct_per_facility").row(
+        0, named=True
+    )
     print("\nFinancial backtest complete.")
     print(f"  Summary: {SUMMARY_PATH}")
     print(f"  By type: {BY_TYPE_PATH}")
