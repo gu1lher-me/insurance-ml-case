@@ -276,6 +276,9 @@ def write_report(summary: pd.DataFrame, by_type: pd.DataFrame, scores: pd.DataFr
     lines = [
         "# Composite Risk Score Backtest Results",
         "",
+        "For the full technical modeling strategy behind these results, see",
+        "`docs/modeling-strategy.md`.",
+        "",
         f"Scoring period: {scores['window_start'].min().date()} to {scores['window_end'].max().date()}",
         "",
         "The backtest estimates financial value by asking which observed holdout events",

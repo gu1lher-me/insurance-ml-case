@@ -237,19 +237,35 @@ def _filter_pre_cutoff(raw: dict[str, pl.DataFrame], cutoff: datetime) -> dict[s
 
 def _altercation_weekly_base_rate(cutoff: datetime) -> float:
     matrix = pl.read_parquet(DATA_7D)
-    pre_windows = matrix.filter(pl.col("window_end") <= cutoff).height
-    if pre_windows == 0:
+    windows = (
+        matrix.filter(pl.col("window_end") <= cutoff)
+        .select("resident_id", "window_start", "window_end")
+        .with_row_index("row_id")
+    )
+    if windows.is_empty():
         return ALTERCATION_7D_BASE_RATE_FALLBACK
 
-    data_start = matrix["window_start"].min()
     incidents = (
         pl.read_parquet(RAW / "incidents.parquet")
         .filter(pl.col("strikeout") == False)
         .filter(pl.col("incident_type") == "Altercation")
-        .filter(pl.col("occurred_at") >= data_start)
         .filter(pl.col("occurred_at") < cutoff)
+        .select("resident_id", "occurred_at")
     )
-    base_rate = incidents.height / pre_windows
+    if incidents.is_empty():
+        return ALTERCATION_7D_BASE_RATE_FALLBACK
+
+    positive_windows = (
+        windows.join(incidents, on="resident_id", how="inner")
+        .filter(
+            (pl.col("occurred_at") >= pl.col("window_start"))
+            & (pl.col("occurred_at") < pl.col("window_end"))
+        )
+        .select("row_id")
+        .unique()
+        .height
+    )
+    base_rate = positive_windows / windows.height
     return float(base_rate) if base_rate > 0 else ALTERCATION_7D_BASE_RATE_FALLBACK
 
 
@@ -341,10 +357,8 @@ def add_composite_costs(scored: pl.DataFrame) -> pl.DataFrame:
         altercation_expected_cost=pl.col("altercation_probability")
         * AVG_CLAIM_COST["altercation"],
         med_error_probability=pl.col("med_error_rule_probability"),
-        choking_probability=pl.col("choking_rule_probability"),
         elopement_probability=pl.col("elopement_rule_probability"),
         med_error_expected_cost=pl.col("med_error_rule_expected_cost"),
-        choking_expected_cost=pl.col("choking_rule_expected_cost"),
         elopement_expected_cost=pl.col("elopement_rule_expected_cost"),
     )
 
@@ -354,7 +368,6 @@ def add_composite_costs(scored: pl.DataFrame) -> pl.DataFrame:
         "wound_expected_cost",
         "altercation_expected_cost",
         "med_error_expected_cost",
-        "choking_expected_cost",
         "elopement_expected_cost",
     ]
 
@@ -365,7 +378,6 @@ def add_composite_costs(scored: pl.DataFrame) -> pl.DataFrame:
         "wound",
         "altercation",
         "med_error",
-        "choking",
         "elopement",
     ]:
         avoidable_exprs.append(
@@ -384,7 +396,6 @@ def add_composite_costs(scored: pl.DataFrame) -> pl.DataFrame:
             "wound",
             "altercation",
             "med_error",
-            "choking",
             "elopement",
         ]
     ]
@@ -404,13 +415,11 @@ def add_reason_codes(scored: pl.DataFrame) -> pl.DataFrame:
         "wound": "wound_expected_cost",
         "altercation": "altercation_expected_cost",
         "med_error": "med_error_expected_cost",
-        "choking": "choking_expected_cost",
         "elopement": "elopement_expected_cost",
     }
 
     rule_cols = {
         "med_error": "med_error_flag",
-        "choking": "choking_flag",
         "elopement": "elopement_flag",
     }
 
@@ -448,7 +457,6 @@ def add_recommended_actions(scored: pl.DataFrame) -> pl.DataFrame:
         "wound": "Skin-integrity review: inspect pressure areas, repositioning plan, nutrition/hydration, and wound-care orders.",
         "altercation": "Behavioral-care review: evaluate triggers, psychotropic monitoring, staffing plan, and resident interactions.",
         "med_error": "Medication reconciliation: review active medication list, recent missed/refused doses, and administration process.",
-        "choking": "Swallowing/diet audit: verify dysphagia status, diet texture orders, supervision needs, and speech therapy follow-up.",
         "elopement": "Elopement precaution review: verify wander-risk care plan, supervision, exit controls, and recent admission adjustment.",
     }
 
@@ -510,7 +518,6 @@ def build_composite_scores(
     scored = add_recommended_actions(scored)
     scored = scored.with_columns(
         pl.lit(rule_precisions["med_error"]).alias("med_error_rule_precision"),
-        pl.lit(rule_precisions["choking"]).alias("choking_rule_precision"),
         pl.lit(rule_precisions["elopement"]).alias("elopement_rule_precision"),
     )
     return scored.sort("composite_expected_cost", descending=True)

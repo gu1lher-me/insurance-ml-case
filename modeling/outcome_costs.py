@@ -18,7 +18,6 @@ INCIDENT_TO_EVENT_TYPE = {
     "Wound": "wound",
     "Altercation": "altercation",
     "Medication Error": "med_error",
-    "Choking": "choking",
     "Elopement": "elopement",
 }
 

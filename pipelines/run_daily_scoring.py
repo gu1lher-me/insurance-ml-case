@@ -169,7 +169,6 @@ def export_action_queue(
         "wound_probability",
         "altercation_probability",
         "med_error_flag",
-        "choking_flag",
         "elopement_flag",
     ]
     output_path.parent.mkdir(parents=True, exist_ok=True)

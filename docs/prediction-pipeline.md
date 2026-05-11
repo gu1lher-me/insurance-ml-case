@@ -8,7 +8,7 @@ batches.
 Use existing MLflow model artifacts and build a fresh target-free scoring matrix:
 
 ```powershell
-.venv\Scripts\python.exe pipelines\run_daily_scoring.py --as-of-date 2025-02-01
+uv run python pipelines\run_daily_scoring.py --as-of-date 2025-02-01
 ```
 
 Outputs:
@@ -26,7 +26,7 @@ If a new batch includes enough newly matured labels, rebuild historical features
 train latest production models, and score the new batch:
 
 ```powershell
-.venv\Scripts\python.exe pipelines\run_daily_scoring.py `
+uv run python pipelines\run_daily_scoring.py `
   --as-of-date 2025-02-01 `
   --label-cutoff 2025-02-01 `
   --rebuild-training-features `
@@ -49,21 +49,21 @@ This performs:
 Build scoring features only:
 
 ```powershell
-.venv\Scripts\python.exe feature_engineering\build_scoring_features.py `
+uv run python feature_engineering\build_scoring_features.py `
   --as-of-date 2025-02-01
 ```
 
 Train latest Tier 1 production models:
 
 ```powershell
-.venv\Scripts\python.exe modeling\train_latest_models.py `
+uv run python modeling\train_latest_models.py `
   --label-cutoff 2025-02-01
 ```
 
 Score a target-free feature file:
 
 ```powershell
-.venv\Scripts\python.exe modeling\score_composite.py `
+uv run python modeling\score_composite.py `
   --features-path data\feature_store\scoring\features_2025-02-01.parquet `
   --output data\scored\composite_scores_2025-02-01.parquet `
   --model-phase production_model
@@ -96,15 +96,15 @@ The action queue includes:
 The pipeline was verified with:
 
 ```powershell
-.venv\Scripts\python.exe modeling\train_latest_models.py `
+uv run python modeling\train_latest_models.py `
   --label-cutoff 2025-02-01 `
   --skip-altercation
 
-.venv\Scripts\python.exe modeling\train_latest_models.py `
+uv run python modeling\train_latest_models.py `
   --label-cutoff 2025-02-01 `
   --only-altercation
 
-.venv\Scripts\python.exe pipelines\run_daily_scoring.py `
+uv run python pipelines\run_daily_scoring.py `
   --as-of-date 2025-02-01 `
   --model-phase production_model
 ```

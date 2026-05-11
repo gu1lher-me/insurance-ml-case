@@ -18,7 +18,6 @@ AVG_CLAIM_COST = {
     "wound": 4000.0,
     "altercation": 2500.0,
     "med_error": 5000.0,
-    "choking": 2500.0,
     "elopement": 2500.0,
 }
 
@@ -28,7 +27,6 @@ PREDICTION_HORIZON_DAYS = {
     "wound": 14,
     "altercation": 7,
     "med_error": 7,
-    "choking": 7,
     "elopement": 30,
 }
 
@@ -40,7 +38,6 @@ INTERVENTION_EFFECTIVENESS = {
     "wound": 0.20,
     "altercation": 0.15,
     "med_error": 0.20,
-    "choking": 0.15,
     "elopement": 0.25,
 }
 
@@ -50,19 +47,23 @@ PRIMARY_CAPACITY_RATE = 0.10
 
 # Resident-level altercation probabilities are propensity scores, not weekly
 # probabilities. The scorer scales them to the observed pre-holdout weekly base
-# rate while preserving resident ranking.
-ALTERCATION_7D_BASE_RATE_FALLBACK = 0.0007
+# rate while preserving resident ranking. This fallback is the current
+# pre-holdout resident-window label rate: at least one altercation in 7 days.
+ALTERCATION_7D_BASE_RATE_FALLBACK = 0.0024
 
 # Fallbacks match the retrospective validation in modeling/artifacts.
 RULE_PRECISION_FALLBACK = {
     "med_error": 0.09583333333333334,
-    "choking": 0.004087193460490463,
     "elopement": 0.02242152466367713,
 }
 
+# Rare-event rule outputs are intentionally kept event-specific instead of
+# pooled into an "other incident" score. The driver sets and interventions are
+# different: medication errors are medication-process risks, and elopement is a
+# cognitive/wandering risk.
+# Pooling them would dilute the clinical signal and obscure the action to take.
 RULE_EVENT_TYPES = {
     "med_error_flag": "med_error",
-    "choking_flag": "choking",
     "elopement_flag": "elopement",
 }
 
@@ -72,7 +73,6 @@ EVENT_LABELS = {
     "wound": "Wound / pressure injury",
     "altercation": "Altercation",
     "med_error": "Medication error",
-    "choking": "Choking",
     "elopement": "Elopement",
 }
 
@@ -110,7 +110,6 @@ def load_rule_precisions(
     df = pd.read_csv(path)
     name_to_event = {
         "Medication Errors": "med_error",
-        "Choking": "choking",
         "Elopement": "elopement",
     }
 

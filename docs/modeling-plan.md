@@ -24,9 +24,8 @@ With **weekly observation windows** (vitals window: Jul 2023–Jan 2025, ~82 wee
 | Falls (7d) | 2,454 | ~246,000 | ~1.0% | ~100:1 | ✅ Feasible |
 | RTH (7d) | 1,703 | ~246,000 | ~0.69% | ~145:1 | ✅ Feasible |
 | Wounds (14d) | ~500 | ~123,000 | ~0.41% | ~245:1 | ✅ Feasible (harder) |
-| Altercations (7d) | ~180 | ~246,000 | ~0.07% | ~1,400:1 | ⚠️ Borderline |
+| Altercations (7d) | 148 positive windows | 61,679 pre-holdout windows | ~0.24% | ~417:1 | ⚠️ Borderline |
 | Med Errors (7d) | ~35 | ~246,000 | ~0.014% | ~7,000:1 | ❌ Impossible |
-| Choking (7d) | ~8 | ~246,000 | ~0.003% | ~30,000:1 | ❌ Impossible |
 | Elopement (30d) | 7 | ~57,000 | ~0.012% | ~8,000:1 | ❌ Impossible |
 
 **Key insight:** The shorter time horizons (7d vs. 30d) increase imbalance ~4× compared to original plan. Falls and RTH remain feasible; wounds are harder but still workable. Altercations are borderline. The remaining three types are statistically impossible for supervised ML.
@@ -56,7 +55,8 @@ These have sufficient volume and clinical feature coverage (vitals 82%, diagnose
 | **H4** | Altercations | 7 days | 228 | Resident-level risk score + rule-based triggers |
 
 **Why not group with other rare events?**
-- Altercations have different risk profiles (behavioral, cognitive) vs. med errors (polypharmacy, complexity) vs. choking (dysphagia) vs. elopement (dementia/wandering)
+- Altercations have different risk profiles (behavioral, cognitive) vs. med errors (polypharmacy, complexity) vs. elopement (dementia/wandering)
+- Choking is present in raw incidents but is excluded from the active model because it is not in the assignment's claim breakdown and has only 9 active incidents.
 - Grouping heterogeneous targets degrades interpretability and intervention specificity
 - 228 events from 127 unique residents (4.2% prevalence) is enough for a **resident-level risk classification** even if temporal window-level prediction is too sparse
 
@@ -92,16 +92,6 @@ For events with <50 occurrences, ML cannot learn reliable patterns. Instead, der
 | Prior medication error history | `incidents` (incident_type="Medication Error") | Recurrence pattern |
 | High missed/refused rate (>15%) in last 14 days | `medications` (status aggregation) | Systemic adherence issues |
 
-##### Choking (9 events)
-
-| Rule | Data Source | Rationale |
-|---|---|---|
-| Dysphagia diagnosis active | `diagnoses` (R13.x — **465 residents** have this!) | Direct anatomical risk factor |
-| Dietary texture modification order | `physician_orders` (category="Dietary - Diet") | Clinical marker for swallowing difficulty |
-| Speech therapy active | `therapy_tracks` (discipline contains "ST" or "SLP") | Indicates active swallowing concern |
-| Neurological diagnoses | `diagnoses` (G20 Parkinson's, I63 stroke, G30 Alzheimer's) | Neurogenic dysphagia |
-| `choking` or `aspiration` document_tags | `document_tags` (tag_id matching) | Prior clinical concern documented |
-
 ##### Elopement (7 events)
 
 | Rule | Data Source | Rationale |
@@ -127,7 +117,6 @@ Where:
 - Altercation risk (H4) contributes via: $\text{AltercationScore}_i \times \$2{,}500$
 - Rule-based flags (Tier 3) contribute a fixed expected cost when active:
   - Med error flag active → +$5,000 × P(flag being correct)
-  - Choking flag active → +$2,500 × P(flag being correct)
   - Elopement flag active → +$2,500 × P(flag being correct)
 
 **Calibrating rule-flag probabilities:** Use retrospective precision of each rule set on historical data to estimate P(event | flag active).
@@ -143,10 +132,10 @@ Where:
 
 | Consideration | Assessment |
 |---|---|
-| **Combined volume** | 228 + 44 + 9 + 7 = 288 events — still very sparse at weekly granularity |
-| **Clinical coherence** | Altercations (behavioral) vs. Med errors (pharmacological) vs. Choking (anatomical) vs. Elopement (cognitive) — **completely different risk profiles** |
+| **Combined volume** | 228 + 44 + 7 = 279 modeled non-Tier-1 events — still very sparse at weekly granularity |
+| **Clinical coherence** | Altercations (behavioral) vs. Med errors (pharmacological) vs. Elopement (cognitive) — **completely different risk profiles** |
 | **Intervention specificity** | A "something bad might happen" alert is not actionable — staff need to know WHAT to watch for |
-| **Feature overlap** | Minimal — altercation features (behavioral dx, aggression tags) don't predict choking (dysphagia dx, dietary orders) |
+| **Feature overlap** | Minimal — altercation features (behavioral dx, aggression tags) do not predict medication-process or wandering risk |
 | **Alternative: "Any Incident" model** | Dominated by falls (87% of combined events) → essentially becomes a falls model with noise |
 
 **Conclusion:** Grouping is inferior to the tiered approach. Each event type has distinct risk factors that demand either a dedicated model (when data permits) or tailored rules (when it doesn't).
@@ -551,7 +540,7 @@ Calibration provides the largest lift among the three models (+0.025 ROC-AUC on 
 
 **Approach:** Stratified 5-Fold CV on resident-level binary classification (not temporal windows). 3,000 residents, 127 positives (4.23% positive rate). 39 features.
 
-**Why resident-level:** The 7-day window representation would produce a ~1,400:1 imbalance (~0.07%), which is statistically impossible for reliable ML. The resident-level framing (4.23% positive) is learnable while still clinically meaningful — it identifies residents *prone* to altercations, which is actionable for care planning.
+**Why resident-level:** The 7-day window representation would produce a ~417:1 imbalance (~0.24%) in the current pre-holdout model matrix, which is still too sparse for reliable temporal ML. The resident-level framing (4.23% positive) is learnable while still clinically meaningful — it identifies residents *prone* to altercations, which is actionable for care planning.
 
 | Phase | ROC-AUC | Brier Score | PR-AUC |
 |---|---|---|---|
@@ -595,26 +584,6 @@ All rule sets were validated retrospectively on the full 3,000-resident dataset.
 
 **Assessment:** Captures the majority of known cases (57.5% recall) with a small footprint (8.0% of residents). Polypharmacy is the dominant trigger. Precision is low by clinical standards but typical for screening rules with rare events (~1.3% base rate).
 
-#### Choking (threshold: ≥ 3 of 5 rules)
-
-| Rule | Residents Flagged | Coverage | TPs Captured |
-|---|---|---|---|
-| Dysphagia dx (R13.x) | 465 | 15.5% | — |
-| Dietary texture modification order | — | — | — |
-| Speech therapy document tag | — | — | — |
-| Neurological dx (G20/G30/I63/G40/G35/F03) | — | — | — |
-| Choking/aspiration document tags | — | — | — |
-| **Composite flag (≥3 rules)** | **734** | **24.5%** | **3 of 8 actual** |
-
-| Metric | Value |
-|---|---|
-| Flagged (coverage) | 734 residents (24.5%) |
-| True positives | 3 |
-| Precision (PPV) | 0.41% |
-| Recall | 37.50% |
-
-**Assessment:** Threshold was raised from ≥2 to ≥3 rules after initial run at ≥2 flagged 46.7% of residents (alert fatigue risk). At ≥3 rules, coverage drops to 24.5% but recall falls to 37.5%. The 8 choking events are too few for reliable threshold calibration — the rule set is best used as a clinical screening tool rather than a predictive model. Dysphagia diagnosis (465 residents) is the dominant driver of coverage.
-
 #### Elopement (threshold: ≥ 2 of 4 rules)
 
 | Rule | Residents Flagged | Coverage | TPs Captured |
@@ -639,7 +608,6 @@ All rule sets were validated retrospectively on the full 3,000-resident dataset.
 | Rule Set | Threshold | Flagged | Precision | Recall | Coverage |
 |---|---|---|---|---|---|
 | Medication Errors | ≥2 of 4 rules | 240 | 9.58% | 57.50% | 8.0% |
-| Choking | ≥3 of 5 rules | 734 | 0.41% | 37.50% | 24.5% |
 | Elopement | ≥2 of 4 rules | 223 | 2.24% | 83.33% | 7.4% |
 
 **General observation:** Business rules achieve high recall (57–83%) for the events they cover, at the cost of low precision. This is the expected trade-off for rare-event screening — the goal is to not miss at-risk residents, not to avoid false alerts. Thresholds are set conservatively (low coverage) to prevent alert fatigue.
@@ -660,7 +628,6 @@ $$\text{RiskScore}_i = \hat{P}_i(\text{Fall}) \times 3{,}500 + \hat{P}_i(\text{R
 
 Where estimated costs for rule flags use retrospective precision as P(event | flag active):
 - Med error flag: $5,000 × 0.0958 ≈ $479 expected cost per flagged resident
-- Choking flag: $2,500 × 0.0041 ≈ $10 expected cost per flagged resident
 - Elopement flag: $2,500 × 0.0224 ≈ $56 expected cost per flagged resident
 
 **Implementation path:** Load latest parquet matrices → run all model `predict_proba()` → join rule flags → compute composite → rank residents descending by expected cost → output reason codes per resident.

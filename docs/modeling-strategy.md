@@ -19,7 +19,7 @@ $$
 $$
 
 where `X_i` contains only information available before the feature cutoff and
-`\mathcal{F}_{t_i}` is the historical information set available at scoring time.
+$\mathcal{F}_{t_i}$ is the historical information set available at scoring time.
 
 The financial target is expected claim exposure:
 
@@ -90,7 +90,7 @@ The implemented strategy is:
 |---|---|---|---|
 | Tier 1 | Falls, RTH, wounds | Temporal binary classifiers | Enough positive events and clinically relevant features |
 | Tier 2 | Altercations | Resident-level classifier plus operational triggers | Weekly labels are too sparse, but resident propensity is learnable |
-| Tier 3 | Medication errors, choking, elopement | Point-in-time business rules | Event counts are too low for supervised ML |
+| Tier 3 | Medication errors, elopement | Point-in-time business rules | Listed claim categories with event counts too low for supervised ML |
 | Tier 4 | All risks | Composite expected-cost score | Converts risk into business priority |
 
 ### 3.1 Why Not ML for Every Incident Type
@@ -101,8 +101,8 @@ $$
 \hat{p}(Y=1 \mid X)
 $$
 
-from very few positive examples. At weekly granularity, medication errors,
-choking, and elopement have expected positive rates on the order of:
+from very few positive examples. At weekly granularity, medication errors and
+elopement have expected positive rates on the order of:
 
 $$
 p \approx 10^{-4} \ \mathrm{to}\ 10^{-5}
@@ -117,19 +117,6 @@ That creates several technical problems:
    has no useful clinical action signal.
 4. Feature attribution becomes misleading because tiny changes in which rare
    cases fall into a fold can dominate the learned pattern.
-
-If `n_+` is the number of positives and a model has even a modest number of
-effective degrees of freedom, then the event-per-parameter ratio becomes too
-small. For example, with fewer than 50 positives, even a simple model with
-20-40 candidate signals can overfit:
-
-$$
-\mathrm{events\ per\ candidate\ feature}
-= \frac{n_+}{d}
-$$
-
-For `n_+ < 50`, this ratio is not enough for a stable high-dimensional
-classifier, especially under temporal validation.
 
 Business rules are therefore not a shortcut. They are the statistically
 appropriate choice for extremely rare, clinically coherent risks where domain
@@ -192,7 +179,7 @@ Altercations have enough resident-level positives but not enough
 resident-window positives. The weekly target is approximately:
 
 $$
-P(\mathrm{altercation\ in\ next\ 7d}) \approx 0.0007
+P(\mathrm{altercation\ in\ next\ 7d}) \approx 0.0024
 $$
 
 so a temporal classifier would be dominated by negatives.
@@ -214,7 +201,8 @@ The current resident-level model achieves:
 | Altercation resident propensity | 0.8837 | 0.2995 |
 
 For the composite weekly score, the resident propensity is scaled to the
-observed pre-holdout weekly base rate:
+observed pre-holdout weekly base rate, measured as the share of historical
+resident-windows with at least one altercation:
 
 $$
 \hat{p}_{i,\mathrm{alt}}
@@ -239,7 +227,7 @@ probability as a 7-day event probability.
 
 ## 6. Tier 3: Business Rules for Rare Events
 
-For medication errors, choking, and elopement, the system uses deterministic
+For medication errors and elopement, the system uses deterministic
 point-in-time rule sets. Each rule emits binary indicators:
 
 $$
@@ -265,8 +253,13 @@ Current thresholds:
 | Rule set | Threshold | Retrospective precision | Recall | Coverage |
 |---|---:|---:|---:|---:|
 | Medication errors | at least 2 of 4 | 9.58% | 57.50% | 8.0% |
-| Choking | at least 3 of 5 | 0.41% | 37.50% | 24.5% |
 | Elopement | at least 2 of 4 | 2.24% | 83.33% | 7.4% |
+
+Choking appears in the raw incident table, but it is excluded from the active
+composite score because the assignment's claim breakdown does not list it as a
+business claim category. With only 9 active incidents and no provided claim-cost
+anchor, a dedicated choking rule would add operational complexity without
+materially improving the stated financial objective.
 
 The rule probability estimate is the retrospective positive predictive value:
 
@@ -297,13 +290,11 @@ This produces the following expected-cost contribution per active flag:
 | Rule flag | Formula | Expected cost |
 |---|---|---:|
 | Medication error | `0.0958 * USD 5,000` | USD 479 |
-| Choking | `0.0041 * USD 2,500` | USD 10 |
 | Elopement | `0.0224 * USD 2,500` | USD 56 |
 
 The important distinction is that these rule outputs are screening signals, not
 high-precision classifiers. They are most useful when paired with low-cost,
-specific interventions: medication reconciliation, diet/swallowing audit, or
-elopement precautions.
+specific interventions: medication reconciliation or elopement precautions.
 
 ## 7. Composite Expected-Cost Score
 
@@ -323,7 +314,7 @@ where:
 
 $$
 \mathcal{R} =
-\{\mathrm{med\ error}, \mathrm{choking}, \mathrm{elopement}\}
+\{\mathrm{med\ error}, \mathrm{elopement}\}
 $$
 
 The model also computes expected avoidable cost:
@@ -345,7 +336,6 @@ Current pilot assumptions:
 | Wound | 20% |
 | Altercation | 15% |
 | Medication error | 20% |
-| Choking | 15% |
 | Elopement | 25% |
 
 These assumptions live in `modeling/business_policy.py` and should be replaced
@@ -406,8 +396,8 @@ The January 2025 holdout simulates a first production month:
 |---|---:|
 | Scoring period | 2025-01-01 to 2025-02-01 |
 | Scored resident-windows | 3,612 |
-| Actual events | 254 |
-| Actual modeled claim cost | USD 1,791,000 |
+| Actual events | 253 |
+| Actual modeled claim cost | USD 1,788,500 |
 
 An event is captured if a resident had an alert before the event and the event
 fell inside that event type's horizon:
@@ -465,22 +455,21 @@ Policy sensitivity:
 
 | Policy | Alerts | Captured claim cost | Avoided claim cost | Intervention cost | Net savings | ROI |
 |---|---:|---:|---:|---:|---:|---:|
-| Top 5% per facility | 226 | USD 168,000 | USD 30,600 | USD 22,600 | USD 8,000 | 0.35x |
-| Top 10% per facility | 401 | USD 291,000 | USD 52,075 | USD 40,100 | USD 11,975 | 0.30x |
-| Top 15% per facility | 590 | USD 448,000 | USD 80,475 | USD 59,000 | USD 21,475 | 0.36x |
+| Top 5% per facility | 226 | USD 172,000 | USD 31,400 | USD 22,600 | USD 8,800 | 0.39x |
+| Top 10% per facility | 401 | USD 298,000 | USD 53,475 | USD 40,100 | USD 13,375 | 0.33x |
+| Top 15% per facility | 590 | USD 444,500 | USD 79,775 | USD 59,000 | USD 20,775 | 0.35x |
 | Top 20% per facility | 753 | USD 581,500 | USD 103,175 | USD 75,300 | USD 27,875 | 0.37x |
-| Economic threshold | 435 | USD 350,500 | USD 63,975 | USD 43,500 | USD 20,475 | 0.47x |
+| Economic threshold | 431 | USD 339,500 | USD 61,775 | USD 43,100 | USD 18,675 | 0.43x |
 
 Primary policy detail (`top_10pct_per_facility`):
 
 | Incident type | Actual events | Captured events | Captured claim cost | Capture rate |
 |---|---:|---:|---:|---:|
 | Return to hospital | 54 | 6 | USD 120,000 | 11.1% |
-| Fall | 159 | 39 | USD 136,500 | 24.5% |
+| Fall | 159 | 41 | USD 143,500 | 25.8% |
 | Wound / pressure injury | 33 | 8 | USD 32,000 | 24.2% |
 | Altercation | 6 | 1 | USD 2,500 | 16.7% |
 | Medication error | 1 | 0 | USD 0 | 0.0% |
-| Choking | 1 | 0 | USD 0 | 0.0% |
 
 The economic-threshold policy has the strongest estimated ROI because it alerts
 when expected avoidable dollars exceed the intervention cost, rather than using

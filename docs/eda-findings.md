@@ -630,9 +630,9 @@ Computed for the **Jul 2023–Jan 2025 window** with the **revised time horizons
 |---|---|---|---|---|---|
 | Fall (H1) | 7 days | 2,454 | ~1.0% | ~100:1 | ✅ Feasible |
 | RTH (H2) | 7 days | 1,703 | ~0.69% | ~145:1 | ✅ Feasible |
-| Altercations (H4) | 7 days | ~180 | ~0.07% | ~1,400:1 | ⚠️ Borderline |
+| Altercations (H4) | 7 days | 148 positive windows | ~0.24% | ~417:1 | ⚠️ Borderline |
 | Med Errors | 7 days | ~35 | ~0.014% | ~7,000:1 | ❌ Impossible |
-| Choking | 7 days | ~8 | ~0.003% | ~30,000:1 | ❌ Impossible |
+| Choking | 7 days | ~8 | ~0.003% | ~30,000:1 | Excluded from claim-backed model |
 
 ### Bi-weekly observation windows (~123,000 resident-fortnights)
 
@@ -646,7 +646,7 @@ Computed for the **Jul 2023–Jan 2025 window** with the **revised time horizons
 |---|---|---|---|---|---|
 | Elopement | 30 days | 7 | ~0.012% | ~8,000:1 | ❌ Impossible |
 
-**Key insight:** Shorter horizons (7d vs 30d) increase imbalance ~4×. Falls and RTH remain learnable; wounds are harder but feasible. Altercations can be approached as resident-level classification (4.2% prevalence) rather than temporal window prediction. Med errors, choking, and elopement require business rules.
+**Key insight:** Shorter horizons (7d vs 30d) increase imbalance ~4×. Falls and RTH remain learnable; wounds are harder but feasible. Altercations can be approached as resident-level classification (4.2% prevalence) rather than temporal window prediction. Med errors and elopement require business rules. Choking is present in raw incidents but excluded because it is not in the assignment's claim breakdown.
 
 **Handling strategy (Tier 1 ML models):**
 - LightGBM: `scale_pos_weight = neg_count / pos_count`
@@ -667,9 +667,8 @@ Computed as: `events_per_100_residents_per_year × avg_cost_per_event`
 | H3 — Wound | $4,000 | ~$104k | ~$21k |
 | H4 — Altercation | $2,500 | ~$25k | ~$5k |
 | Rules — Med Error | $5,000 | ~$15k | ~$3k |
-| Rules — Choking | $2,500 | ~$1k | negligible |
 | Rules — Elopement | $2,500 | ~$1k | negligible |
-| **Total** | | **~$1,189k** | **~$238k** |
+| **Total** | | **~$1,188k** | **~$237k** |
 
 > RTH is the clear priority for business impact. A 20% reduction in RTH events per 100 residents saves ~$151k/year — roughly 3× the value of equivalent fall reduction. The rule-based alerts for rare events add minimal $ but address liability/compliance concerns.
 
@@ -683,13 +682,13 @@ Computed as: `events_per_100_residents_per_year × avg_cost_per_event`
 |---|---|---|---|
 | **Tier 1 — Full ML** | H1 (Falls 7d), H2 (RTH 7d), H3 (Wounds 14d) | LightGBM binary classifiers, temporal CV, SHAP | 589–2,505 |
 | **Tier 2 — Hybrid ML + Rules** | H4 (Altercations 7d) | Resident-level risk score (LR/GBM) + rule-based triggers | 228 (127 residents) |
-| **Tier 3 — Business Rules Only** | Med Errors, Choking, Elopement | Rule-based flags from diagnoses, orders, document_tags | 7–44 |
+| **Tier 3 — Business Rules Only** | Med Errors, Elopement | Rule-based flags from diagnoses, orders, document_tags | 7–44 |
 | **Tier 4 — Composite Score** | All combined | Calibrated probabilities + rule flags → expected cost ranking | — |
 
 ### Why Not Group Rare Events Into One Model?
 
-- Combined volume (288) is still too sparse at weekly granularity
-- Clinically heterogeneous: altercations (behavioral), med errors (pharmacological), choking (anatomical), elopement (cognitive)
+- Combined volume (279 modeled non-Tier-1 events) is still too sparse at weekly granularity
+- Clinically heterogeneous: altercations (behavioral), med errors (pharmacological), elopement (cognitive)
 - Different interventions needed — "something bad might happen" is not actionable
 - A grouped model would be dominated by altercations (79% of group) and learn nothing about the other types
 
@@ -710,7 +709,6 @@ Computed as: `events_per_100_residents_per_year × avg_cost_per_event`
 | Event | Key Rules | Data Sources |
 |---|---|---|
 | **Med Errors** | Polypharmacy (>15 concurrent), new pharmacy orders in 7d, cognitive impairment dx, "Psychotropic Medication Monitoring" need, prior med error, high missed/refused rate | `medications`, `physician_orders`, `diagnoses`, `needs`, `incidents` |
-| **Choking** | Dysphagia dx (R13.x — 465 residents!), dietary orders, speech therapy active, neurological dx (Parkinson's, stroke), aspiration document_tags | `diagnoses`, `physician_orders`, `therapy_tracks`, `document_tags` |
 | **Elopement** | Dementia/Alzheimer's dx, wandering/elopement document_tags, prior elopement, cognitive ADL decline, new admission (first 30d) | `diagnoses`, `document_tags`, `incidents`, `adl_responses`, `residents` |
 
 ### Data Pipeline

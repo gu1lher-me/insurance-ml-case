@@ -4,7 +4,6 @@ Tier 3 — Business Rules for Low-Frequency Incident Types
 
 Rule-based risk flags for incidents too rare for ML:
   - Medication Errors (46 events)
-  - Choking (9 events)
   - Elopement (10 events)
 
 Each rule set produces a binary risk flag per resident.
@@ -44,10 +43,8 @@ def load_raw():
     incidents = pl.read_parquet(RAW / "incidents.parquet").filter(pl.col("strikeout") == False)
     diagnoses = pl.read_parquet(RAW / "diagnoses.parquet").filter(pl.col("strikeout") == False)
     medications = pl.read_parquet(RAW / "medications.parquet")
-    physician_orders = pl.read_parquet(RAW / "physician_orders.parquet")
-    needs = pl.read_parquet(RAW / "needs.parquet").filter(pl.col("strikeout") == False)
     document_tags = pl.read_parquet(RAW / "document_tags.parquet").filter(pl.col("deleted_at").is_null())
-    return residents, incidents, diagnoses, medications, physician_orders, needs, document_tags
+    return residents, incidents, diagnoses, medications, document_tags
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -149,106 +146,6 @@ def medication_error_rules(residents, incidents, diagnoses, medications, doc_tag
     )
 
     return base, rule_cols, "med_error_flag", "actual_med_error"
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-#  Choking Rules
-# ═══════════════════════════════════════════════════════════════════════════════
-#
-# Risk factors for choking:
-#   1. Dysphagia diagnosis (R13.x)
-#   2. Dietary texture modification order (Dietary - Diet category)
-#   3. Speech therapy tag or order
-#   4. Neurological diagnosis (G20 Parkinson's, G30 Alzheimer's, I63 stroke, G40 epilepsy)
-#   5. Choking/aspiration-related document tags
-#
-# Flagged if >= 2 of the 5 rules trigger.
-
-
-def choking_rules(residents, incidents, diagnoses, physician_orders, doc_tags):
-    base = residents.select("resident_id")
-
-    # Rule 1: Dysphagia diagnosis (R13.x)
-    dysphagia = (
-        diagnoses
-        .filter(pl.col("icd_10_code").str.starts_with("R13"))
-        .select("resident_id").unique()
-        .with_columns(pl.lit(1).cast(pl.Int8).alias("rule_dysphagia"))
-    )
-    base = base.join(dysphagia, on="resident_id", how="left").with_columns(
-        pl.col("rule_dysphagia").fill_null(0)
-    )
-
-    # Rule 2: Dietary modification order
-    diet_orders = (
-        physician_orders
-        .filter(pl.col("category").str.contains("Dietary"))
-        .select("resident_id").unique()
-        .with_columns(pl.lit(1).cast(pl.Int8).alias("rule_diet_order"))
-    )
-    base = base.join(diet_orders, on="resident_id", how="left").with_columns(
-        pl.col("rule_diet_order").fill_null(0)
-    )
-
-    # Rule 3: Speech therapy tag
-    speech = (
-        doc_tags
-        .filter(pl.col("tag_id") == "speech_therapy")
-        .select("resident_id").unique()
-        .with_columns(pl.lit(1).cast(pl.Int8).alias("rule_speech_therapy"))
-    )
-    base = base.join(speech, on="resident_id", how="left").with_columns(
-        pl.col("rule_speech_therapy").fill_null(0)
-    )
-
-    # Rule 4: Neurological diagnoses
-    neuro_codes = ["G20", "G30", "I63", "G40", "G35", "F03"]
-    neuro = (
-        diagnoses
-        .filter(
-            pl.any_horizontal(
-                [pl.col("icd_10_code").str.starts_with(code) for code in neuro_codes]
-            )
-        )
-        .select("resident_id").unique()
-        .with_columns(pl.lit(1).cast(pl.Int8).alias("rule_neuro_dx"))
-    )
-    base = base.join(neuro, on="resident_id", how="left").with_columns(
-        pl.col("rule_neuro_dx").fill_null(0)
-    )
-
-    # Rule 5: Choking-related document tags
-    choking_tags = ["choking", "choking_incident", "downgraded_diet"]
-    choke_tag = (
-        doc_tags
-        .filter(pl.col("tag_id").is_in(choking_tags))
-        .select("resident_id").unique()
-        .with_columns(pl.lit(1).cast(pl.Int8).alias("rule_choking_tag"))
-    )
-    base = base.join(choke_tag, on="resident_id", how="left").with_columns(
-        pl.col("rule_choking_tag").fill_null(0)
-    )
-
-    # Composite
-    rule_cols = ["rule_dysphagia", "rule_diet_order", "rule_speech_therapy", "rule_neuro_dx", "rule_choking_tag"]
-    base = base.with_columns(
-        rule_score=pl.sum_horizontal(rule_cols),
-    ).with_columns(
-        choking_flag=(pl.col("rule_score") >= 3).cast(pl.Int8),
-    )
-
-    # Ground truth
-    actual = (
-        incidents
-        .filter(pl.col("incident_type") == "Choking")
-        .select("resident_id").unique()
-        .with_columns(pl.lit(1).cast(pl.Int8).alias("actual_choking"))
-    )
-    base = base.join(actual, on="resident_id", how="left").with_columns(
-        pl.col("actual_choking").fill_null(0)
-    )
-
-    return base, rule_cols, "choking_flag", "actual_choking"
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -450,7 +347,6 @@ def score_point_in_time_rules(
     incidents: pl.DataFrame,
     diagnoses: pl.DataFrame,
     medications: pl.DataFrame,
-    physician_orders: pl.DataFrame,
     document_tags: pl.DataFrame,
     rule_precisions: dict[str, float] | None = None,
 ) -> pl.DataFrame:
@@ -545,54 +441,6 @@ def score_point_in_time_rules(
         med_error_flag=(pl.col("med_error_rule_score") >= 2).cast(pl.Int8)
     )
 
-    dysphagia = _binary_group(
-        dx_active.filter(pl.col("icd_10_code").str.starts_with("R13")),
-        "rule_dysphagia",
-    )
-    neuro_codes = ["G20", "G30", "I63", "G40", "G35", "F03"]
-    neuro = _binary_group(
-        dx_active.filter(_prefix_expr("icd_10_code", neuro_codes)),
-        "rule_neuro_dx",
-    )
-    out = (
-        out.join(dysphagia, on="score_id", how="left")
-        .join(neuro, on="score_id", how="left")
-        .with_columns(
-            pl.col("rule_dysphagia").fill_null(0),
-            pl.col("rule_neuro_dx").fill_null(0),
-        )
-    )
-
-    orders = (
-        base.select("score_id", "resident_id", "feature_cutoff")
-        .join(
-            physician_orders.select(
-                "resident_id",
-                "category",
-                "ordered_at",
-                "start_at",
-                "end_at",
-                "order_status",
-            ),
-            on="resident_id",
-            how="left",
-        )
-        .with_columns(
-            order_effective_at=pl.coalesce(["start_at", "ordered_at"]),
-            category_clean=pl.col("category").fill_null(""),
-        )
-        .filter(pl.col("order_effective_at").is_not_null())
-        .filter(pl.col("order_effective_at") <= pl.col("feature_cutoff"))
-        .filter(pl.col("end_at").is_null() | (pl.col("end_at") > pl.col("feature_cutoff")))
-    )
-    diet_order = _binary_group(
-        orders.filter(pl.col("category_clean").str.contains("Dietary")),
-        "rule_diet_order",
-    )
-    out = out.join(diet_order, on="score_id", how="left").with_columns(
-        pl.col("rule_diet_order").fill_null(0)
-    )
-
     tags_before_cutoff = (
         base.select("score_id", "resident_id", "feature_cutoff")
         .join(
@@ -602,36 +450,6 @@ def score_point_in_time_rules(
         )
         .filter(pl.col("tag_id").is_not_null())
         .filter(pl.col("created_at") <= pl.col("feature_cutoff"))
-    )
-    speech = _binary_group(
-        tags_before_cutoff.filter(pl.col("tag_id") == "speech_therapy"),
-        "rule_speech_therapy",
-    )
-    choking_tags = ["choking", "choking_incident", "downgraded_diet", "aspiration"]
-    choke_tag = _binary_group(
-        tags_before_cutoff.filter(pl.col("tag_id").is_in(choking_tags)),
-        "rule_choking_tag",
-    )
-    out = (
-        out.join(speech, on="score_id", how="left")
-        .join(choke_tag, on="score_id", how="left")
-        .with_columns(
-            pl.col("rule_speech_therapy").fill_null(0),
-            pl.col("rule_choking_tag").fill_null(0),
-        )
-    )
-
-    choking_rule_cols = [
-        "rule_dysphagia",
-        "rule_diet_order",
-        "rule_speech_therapy",
-        "rule_neuro_dx",
-        "rule_choking_tag",
-    ]
-    out = out.with_columns(
-        choking_rule_score=pl.sum_horizontal(choking_rule_cols),
-    ).with_columns(
-        choking_flag=(pl.col("choking_rule_score") >= 3).cast(pl.Int8)
     )
 
     dementia_codes = ["F01", "F02", "F03", "G30"]
@@ -690,17 +508,12 @@ def score_point_in_time_rules(
         med_error_rule_probability=pl.when(pl.col("med_error_flag") == 1)
         .then(pl.lit(float(precisions["med_error"])))
         .otherwise(0.0),
-        choking_rule_probability=pl.when(pl.col("choking_flag") == 1)
-        .then(pl.lit(float(precisions["choking"])))
-        .otherwise(0.0),
         elopement_rule_probability=pl.when(pl.col("elopement_flag") == 1)
         .then(pl.lit(float(precisions["elopement"])))
         .otherwise(0.0),
     ).with_columns(
         med_error_rule_expected_cost=pl.col("med_error_rule_probability")
         * AVG_CLAIM_COST["med_error"],
-        choking_rule_expected_cost=pl.col("choking_rule_probability")
-        * AVG_CLAIM_COST["choking"],
         elopement_rule_expected_cost=pl.col("elopement_rule_probability")
         * AVG_CLAIM_COST["elopement"],
     )
@@ -711,21 +524,20 @@ def score_point_in_time_rules(
 def score_rules_for_spine(spine: pl.DataFrame) -> pl.DataFrame:
     """Load raw inputs and score point-in-time rules for a scoring spine."""
 
-    residents, incidents, diagnoses, medications, orders, needs, doc_tags = load_raw()
+    residents, incidents, diagnoses, medications, doc_tags = load_raw()
     return score_point_in_time_rules(
         spine=spine,
         residents=residents,
         incidents=incidents,
         diagnoses=diagnoses,
         medications=medications,
-        physician_orders=orders,
         document_tags=doc_tags,
     )
 
 
 def main():
     print("Loading raw tables...")
-    residents, incidents, diagnoses, medications, orders, needs, doc_tags = load_raw()
+    residents, incidents, diagnoses, medications, doc_tags = load_raw()
     print(f"  {residents.shape[0]:,} residents")
 
     results = []
@@ -735,12 +547,6 @@ def main():
         residents, incidents, diagnoses, medications, doc_tags
     )
     results.append(validate_rule(df_med, rules_med, flag_med, actual_med, "Medication Errors"))
-
-    # Choking
-    df_choke, rules_choke, flag_choke, actual_choke = choking_rules(
-        residents, incidents, diagnoses, orders, doc_tags
-    )
-    results.append(validate_rule(df_choke, rules_choke, flag_choke, actual_choke, "Choking"))
 
     # Elopement
     df_elop, rules_elop, flag_elop, actual_elop = elopement_rules(
