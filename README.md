@@ -176,6 +176,17 @@ Tier 1 models estimate near-term probabilities:
 These are CatBoost binary classifiers because the feature matrix has meaningful
 missingness and a mix of nonlinear clinical signals.
 
+The current POC tunes a compact set of CatBoost parameters such as learning
+rate, depth, sampling, and regularization. It does not yet optimize class
+reweighting parameters such as `auto_class_weights`, `scale_pos_weight`, or
+`class_weights`. Those parameters are highly relevant because all supervised
+targets are imbalanced, but choosing them well requires extra temporal
+cross-validation and calibration checks. For this proof of concept, the safer
+choice was to avoid an arbitrary reweighting value and keep the probability
+outputs easier to interpret. A natural next optimization step is to add class
+weighting to the Optuna search space and evaluate whether it improves business
+metrics such as captured claim exposure, avoided dollars, and action-queue ROI.
+
 The altercation model is resident-level rather than weekly. Its output is
 scaled to the observed weekly base rate before entering the composite score.
 
@@ -270,6 +281,81 @@ to surface residents whose behavioral profile makes altercation prevention
 worth considering, then price that signal conservatively as a weekly expected
 claim-cost contribution.
 
+### Rare-Event Rule Models In Practice
+
+Medication errors and elopement are handled with point-in-time business rules
+instead of supervised ML. These events are claim-relevant, but the observed
+positive counts are too small for stable weekly probability models. A rare-event
+classifier would have very few positives per temporal fold, weak probability
+calibration, and a high risk of learning noise instead of operational signal.
+
+The rule models answer a simpler question:
+
+```text
+Does this resident-window have enough known risk factors to justify a focused review?
+```
+
+Each rule set emits binary rule indicators, sums them into a rule score, and
+turns on the event flag when at least 2 of 4 rules are active. The scoring
+version is point-in-time: it uses only records known at or before
+`feature_cutoff`, including prior incidents, active diagnoses, document tags
+created before cutoff, and recent medication-administration records.
+
+Medication-error rules:
+
+| Rule | Trigger |
+|---|---|
+| `rule_polypharmacy` | At least 9 distinct medications in the last 14 days |
+| `rule_missed_rate` | More than 10% of scheduled doses missed or refused in the last 14 days |
+| `rule_cognitive` | Cognitive diagnosis such as dementia, delirium, Alzheimer's, or related codes |
+| `rule_prior_med_error` | Prior medication-error incident before the feature cutoff |
+
+Elopement rules:
+
+| Rule | Trigger |
+|---|---|
+| `rule_dementia` | Dementia or Alzheimer's diagnosis |
+| `rule_wander_tag` | Wandering or elopement risk tag before the feature cutoff |
+| `rule_prior_elopement` | Prior elopement incident before the feature cutoff |
+| `rule_new_admission` | Resident is within 90 days of admission |
+
+Retrospective validation treats the rules as screening tools:
+
+| Rule set | Threshold | Precision | Recall | Coverage |
+|---|---:|---:|---:|---:|
+| Medication errors | At least 2 of 4 | 9.58% | 57.50% | 8.0% |
+| Elopement | At least 2 of 4 | 2.24% | 83.33% | 7.4% |
+
+The precision values are intentionally used as conservative probability
+estimates when a flag is active:
+
+```text
+med_error_probability = 0.0958 if med_error_flag else 0
+elopement_probability = 0.0224 if elopement_flag else 0
+```
+
+Those probabilities then become expected claim dollars:
+
+| Active flag | Expected-cost calculation | Expected cost |
+|---|---:|---:|
+| Medication error | `0.0958 * 5000` | USD 479 |
+| Elopement | `0.0224 * 2500` | USD 56 |
+
+These expected costs enter the same composite score as the ML model outputs.
+They can also appear in `reason_codes` as `rule:med_error` or
+`rule:elopement`. The action queue translates them into targeted operational
+reviews:
+
+| Rule reason | Suggested action |
+|---|---|
+| `rule:med_error` | Medication reconciliation: review active medication list, recent missed/refused doses, and administration process |
+| `rule:elopement` | Elopement precaution review: verify wander-risk care plan, supervision, exit controls, and recent admission adjustment |
+
+The low precision is expected because these events are rare. The goal is not to
+claim high certainty; it is to preserve clinically interpretable, low-cost
+prevention signals that supervised ML would not estimate reliably from this
+sample.
+
 The composite score is:
 
 ```text
@@ -363,7 +449,7 @@ The current system is validated in backtest. To move to production, consider:
 
 ### A/B Testing & Causal Validation
 - Deploy model predictions to a subset of facilities while maintaining control groups
-- Compare alerts + interventions vs. baseline over 2–3 months
+- Compare alerts + interventions vs. baseline over 2-3 months
 - Measure actual incidents, claims, and facility engagement rates
 - Use difference-in-differences or causal forest to account for facility baseline risk and resident mix
 - Decision: roll out to full portfolio or refine model based on pilot results
@@ -379,7 +465,7 @@ The current system is validated in backtest. To move to production, consider:
   - **Drift monitoring**: detect feature/label/prediction drift and alert on performance degradation
   - **Model retraining**: retrain Tier 1 and altercation models using expanding-window logic
   - **Batch scoring**: score all residents and generate action queues  
-- Integrate with MLflow model registry for governance (staging → production promotion)
+- Integrate with MLflow model registry for governance (staging to production promotion)
 - Add data validation and error-handling; configure alerting and logging
 
 ## Reproducing the Pipeline
