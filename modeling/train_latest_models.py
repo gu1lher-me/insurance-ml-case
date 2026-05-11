@@ -74,7 +74,7 @@ def train_tier1_target(target: str, label_cutoff: datetime) -> None:
     if train_df.is_empty():
         raise ValueError(f"No matured rows available for {target} by {label_cutoff.date()}")
 
-    X = train_df.select(feature_cols).to_pandas()
+    X = train_df.select(feature_cols)
     y = train_df[target].to_numpy().ravel()
 
     params, params_path = load_hyperparameters(HYPERPARAMETERS_DIR, target)
@@ -145,7 +145,7 @@ def train_altercation(label_cutoff: datetime) -> None:
     df, feature_cols, target_col = build_altercation_dataset(
         residents, incidents, diagnoses, needs, doc_tags, signal_end=label_cutoff
     )
-    X = df.select(feature_cols).to_pandas()
+    X = df.select(feature_cols)
     y = df[target_col].to_numpy().ravel()
 
     params, params_path = load_hyperparameters(HYPERPARAMETERS_DIR, "altercation")

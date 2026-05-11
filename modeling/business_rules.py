@@ -554,11 +554,8 @@ def main():
     )
     results.append(validate_rule(df_elop, rules_elop, flag_elop, actual_elop, "Elopement"))
 
-    # Summary table
-    import pandas as pd
-    summary = pd.DataFrame(results)
     summary_path = ARTIFACTS_DIR / "business_rules_validation.csv"
-    summary.to_csv(summary_path, index=False)
+    pl.DataFrame(results).write_csv(summary_path)
     print(f"\n  Summary saved to {summary_path}")
 
     print("\n  SUMMARY")
