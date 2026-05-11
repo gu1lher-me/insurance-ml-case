@@ -23,7 +23,7 @@ import polars as pl
 
 try:
     from .admission_features import compute_admission_context
-except ImportError:  # pragma: no cover - allows direct script execution
+except ImportError:
     from admission_features import compute_admission_context
 
 # ─── Configuration ─────────────────────────────────────────────────────────────
