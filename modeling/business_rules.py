@@ -4,7 +4,6 @@ Tier 3 — Business Rules for Low-Frequency Incident Types
 
 Rule-based risk flags for incidents too rare for ML:
   - Medication Errors (46 events)
-  - Choking (9 events)
   - Elopement (10 events)
 
 Each rule set produces a binary risk flag per resident.
@@ -15,12 +14,18 @@ Usage:
     python modeling/business_rules.py
 """
 
+import sys
 from datetime import datetime
 from pathlib import Path
 
 import polars as pl
 
 ROOT = Path(__file__).resolve().parent.parent
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from modeling.business_policy import AVG_CLAIM_COST, load_rule_precisions
+
 RAW = ROOT / "data" / "raw"
 ARTIFACTS_DIR = ROOT / "modeling" / "artifacts"
 ARTIFACTS_DIR.mkdir(parents=True, exist_ok=True)
@@ -38,10 +43,8 @@ def load_raw():
     incidents = pl.read_parquet(RAW / "incidents.parquet").filter(pl.col("strikeout") == False)
     diagnoses = pl.read_parquet(RAW / "diagnoses.parquet").filter(pl.col("strikeout") == False)
     medications = pl.read_parquet(RAW / "medications.parquet")
-    physician_orders = pl.read_parquet(RAW / "physician_orders.parquet")
-    needs = pl.read_parquet(RAW / "needs.parquet").filter(pl.col("strikeout") == False)
     document_tags = pl.read_parquet(RAW / "document_tags.parquet").filter(pl.col("deleted_at").is_null())
-    return residents, incidents, diagnoses, medications, physician_orders, needs, document_tags
+    return residents, incidents, diagnoses, medications, document_tags
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -143,106 +146,6 @@ def medication_error_rules(residents, incidents, diagnoses, medications, doc_tag
     )
 
     return base, rule_cols, "med_error_flag", "actual_med_error"
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-#  Choking Rules
-# ═══════════════════════════════════════════════════════════════════════════════
-#
-# Risk factors for choking:
-#   1. Dysphagia diagnosis (R13.x)
-#   2. Dietary texture modification order (Dietary - Diet category)
-#   3. Speech therapy tag or order
-#   4. Neurological diagnosis (G20 Parkinson's, G30 Alzheimer's, I63 stroke, G40 epilepsy)
-#   5. Choking/aspiration-related document tags
-#
-# Flagged if >= 2 of the 5 rules trigger.
-
-
-def choking_rules(residents, incidents, diagnoses, physician_orders, doc_tags):
-    base = residents.select("resident_id")
-
-    # Rule 1: Dysphagia diagnosis (R13.x)
-    dysphagia = (
-        diagnoses
-        .filter(pl.col("icd_10_code").str.starts_with("R13"))
-        .select("resident_id").unique()
-        .with_columns(pl.lit(1).cast(pl.Int8).alias("rule_dysphagia"))
-    )
-    base = base.join(dysphagia, on="resident_id", how="left").with_columns(
-        pl.col("rule_dysphagia").fill_null(0)
-    )
-
-    # Rule 2: Dietary modification order
-    diet_orders = (
-        physician_orders
-        .filter(pl.col("category").str.contains("Dietary"))
-        .select("resident_id").unique()
-        .with_columns(pl.lit(1).cast(pl.Int8).alias("rule_diet_order"))
-    )
-    base = base.join(diet_orders, on="resident_id", how="left").with_columns(
-        pl.col("rule_diet_order").fill_null(0)
-    )
-
-    # Rule 3: Speech therapy tag
-    speech = (
-        doc_tags
-        .filter(pl.col("tag_id") == "speech_therapy")
-        .select("resident_id").unique()
-        .with_columns(pl.lit(1).cast(pl.Int8).alias("rule_speech_therapy"))
-    )
-    base = base.join(speech, on="resident_id", how="left").with_columns(
-        pl.col("rule_speech_therapy").fill_null(0)
-    )
-
-    # Rule 4: Neurological diagnoses
-    neuro_codes = ["G20", "G30", "I63", "G40", "G35", "F03"]
-    neuro = (
-        diagnoses
-        .filter(
-            pl.any_horizontal(
-                [pl.col("icd_10_code").str.starts_with(code) for code in neuro_codes]
-            )
-        )
-        .select("resident_id").unique()
-        .with_columns(pl.lit(1).cast(pl.Int8).alias("rule_neuro_dx"))
-    )
-    base = base.join(neuro, on="resident_id", how="left").with_columns(
-        pl.col("rule_neuro_dx").fill_null(0)
-    )
-
-    # Rule 5: Choking-related document tags
-    choking_tags = ["choking", "choking_incident", "downgraded_diet"]
-    choke_tag = (
-        doc_tags
-        .filter(pl.col("tag_id").is_in(choking_tags))
-        .select("resident_id").unique()
-        .with_columns(pl.lit(1).cast(pl.Int8).alias("rule_choking_tag"))
-    )
-    base = base.join(choke_tag, on="resident_id", how="left").with_columns(
-        pl.col("rule_choking_tag").fill_null(0)
-    )
-
-    # Composite
-    rule_cols = ["rule_dysphagia", "rule_diet_order", "rule_speech_therapy", "rule_neuro_dx", "rule_choking_tag"]
-    base = base.with_columns(
-        rule_score=pl.sum_horizontal(rule_cols),
-    ).with_columns(
-        choking_flag=(pl.col("rule_score") >= 3).cast(pl.Int8),
-    )
-
-    # Ground truth
-    actual = (
-        incidents
-        .filter(pl.col("incident_type") == "Choking")
-        .select("resident_id").unique()
-        .with_columns(pl.lit(1).cast(pl.Int8).alias("actual_choking"))
-    )
-    base = base.join(actual, on="resident_id", how="left").with_columns(
-        pl.col("actual_choking").fill_null(0)
-    )
-
-    return base, rule_cols, "choking_flag", "actual_choking"
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -386,9 +289,255 @@ def validate_rule(df, rule_cols, flag_col, actual_col, name):
 # ═══════════════════════════════════════════════════════════════════════════════
 
 
+# ============================================================================
+#  Point-in-Time Scoring
+# ============================================================================
+
+RULE_META_COLS = [
+    "score_id",
+    "resident_id",
+    "facility_id",
+    "window_start",
+    "window_end",
+    "feature_cutoff",
+]
+
+
+def _ensure_scoring_spine(spine: pl.DataFrame) -> pl.DataFrame:
+    """Prepare a resident-window spine for point-in-time rule scoring."""
+
+    missing = [c for c in RULE_META_COLS[1:] if c not in spine.columns]
+    if missing:
+        raise ValueError(f"Rule scoring spine is missing columns: {missing}")
+
+    if "score_id" not in spine.columns:
+        spine = spine.with_row_index("score_id")
+    return spine.select(RULE_META_COLS)
+
+
+def _prefix_expr(column: str, prefixes: list[str]) -> pl.Expr:
+    return pl.any_horizontal(
+        [pl.col(column).str.starts_with(prefix) for prefix in prefixes]
+    )
+
+
+def _active_diagnoses(spine: pl.DataFrame, diagnoses: pl.DataFrame) -> pl.DataFrame:
+    return (
+        spine.select("score_id", "resident_id", "feature_cutoff")
+        .join(
+            diagnoses.select("resident_id", "icd_10_code", "onset_at", "resolved_at"),
+            on="resident_id",
+            how="left",
+        )
+        .filter(pl.col("icd_10_code").is_not_null())
+        .filter(pl.col("onset_at").is_null() | (pl.col("onset_at") <= pl.col("feature_cutoff")))
+        .filter(pl.col("resolved_at").is_null() | (pl.col("resolved_at") > pl.col("feature_cutoff")))
+    )
+
+
+def _binary_group(df: pl.DataFrame, col_name: str) -> pl.DataFrame:
+    if df.is_empty():
+        return pl.DataFrame(schema={"score_id": pl.UInt32, col_name: pl.Int8})
+    return df.group_by("score_id").agg(pl.lit(1).cast(pl.Int8).alias(col_name))
+
+
+def score_point_in_time_rules(
+    spine: pl.DataFrame,
+    residents: pl.DataFrame,
+    incidents: pl.DataFrame,
+    diagnoses: pl.DataFrame,
+    medications: pl.DataFrame,
+    document_tags: pl.DataFrame,
+    rule_precisions: dict[str, float] | None = None,
+) -> pl.DataFrame:
+    """Score rare-event business rules at each row's feature cutoff.
+
+    This scorer only uses records available at or before `feature_cutoff`,
+    making it suitable for holdout scoring and production-style batch scoring.
+    """
+
+    base = _ensure_scoring_spine(spine)
+    out = base.clone()
+    precisions = rule_precisions or load_rule_precisions()
+
+    med_window = (
+        base.select("score_id", "resident_id", "feature_cutoff")
+        .join(
+            medications.select("resident_id", "description", "scheduled_at", "status"),
+            on="resident_id",
+            how="left",
+        )
+        .filter(pl.col("scheduled_at").is_not_null())
+        .filter(pl.col("scheduled_at") <= pl.col("feature_cutoff"))
+        .filter(pl.col("scheduled_at") >= pl.col("feature_cutoff") - pl.duration(days=14))
+    )
+    if med_window.is_empty():
+        med_agg = pl.DataFrame(
+            schema={
+                "score_id": pl.UInt32,
+                "n_distinct_meds_14d": pl.UInt32,
+                "total_doses_14d": pl.UInt32,
+                "missed_refused_14d": pl.UInt32,
+            }
+        )
+    else:
+        med_agg = med_window.group_by("score_id").agg(
+            pl.col("description").n_unique().alias("n_distinct_meds_14d"),
+            pl.len().alias("total_doses_14d"),
+            ((pl.col("status") == "Missed") | (pl.col("status") == "Refused"))
+            .sum()
+            .alias("missed_refused_14d"),
+        )
+
+    out = out.join(med_agg, on="score_id", how="left").with_columns(
+        pl.col("n_distinct_meds_14d").fill_null(0),
+        pl.col("total_doses_14d").fill_null(0),
+        pl.col("missed_refused_14d").fill_null(0),
+    )
+    out = out.with_columns(
+        med_missed_refused_rate_14d=pl.when(pl.col("total_doses_14d") > 0)
+        .then(pl.col("missed_refused_14d") / pl.col("total_doses_14d"))
+        .otherwise(0.0)
+    )
+    out = out.with_columns(
+        rule_polypharmacy=(pl.col("n_distinct_meds_14d") >= 9).cast(pl.Int8),
+        rule_missed_rate=(pl.col("med_missed_refused_rate_14d") > 0.10).cast(pl.Int8),
+    )
+
+    dx_active = _active_diagnoses(base, diagnoses)
+    cognitive_codes = ["F01", "F02", "F03", "F05", "G30", "G31"]
+    cognitive = _binary_group(
+        dx_active.filter(_prefix_expr("icd_10_code", cognitive_codes)),
+        "rule_cognitive",
+    )
+    out = out.join(cognitive, on="score_id", how="left").with_columns(
+        pl.col("rule_cognitive").fill_null(0)
+    )
+
+    prior_med_error = _binary_group(
+        base.select("score_id", "resident_id", "feature_cutoff")
+        .join(
+            incidents.select("resident_id", "incident_type", "occurred_at"),
+            on="resident_id",
+            how="left",
+        )
+        .filter(pl.col("incident_type") == "Medication Error")
+        .filter(pl.col("occurred_at") <= pl.col("feature_cutoff")),
+        "rule_prior_med_error",
+    )
+    out = out.join(prior_med_error, on="score_id", how="left").with_columns(
+        pl.col("rule_prior_med_error").fill_null(0)
+    )
+
+    med_rule_cols = [
+        "rule_polypharmacy",
+        "rule_missed_rate",
+        "rule_cognitive",
+        "rule_prior_med_error",
+    ]
+    out = out.with_columns(
+        med_error_rule_score=pl.sum_horizontal(med_rule_cols),
+    ).with_columns(
+        med_error_flag=(pl.col("med_error_rule_score") >= 2).cast(pl.Int8)
+    )
+
+    tags_before_cutoff = (
+        base.select("score_id", "resident_id", "feature_cutoff")
+        .join(
+            document_tags.select("resident_id", "tag_id", "created_at"),
+            on="resident_id",
+            how="left",
+        )
+        .filter(pl.col("tag_id").is_not_null())
+        .filter(pl.col("created_at") <= pl.col("feature_cutoff"))
+    )
+
+    dementia_codes = ["F01", "F02", "F03", "G30"]
+    dementia = _binary_group(
+        dx_active.filter(_prefix_expr("icd_10_code", dementia_codes)),
+        "rule_dementia",
+    )
+    wander_tags = ["wandering_risk_assessment", "elopement_incident", "elopement_risk"]
+    wander = _binary_group(
+        tags_before_cutoff.filter(pl.col("tag_id").is_in(wander_tags)),
+        "rule_wander_tag",
+    )
+    prior_elopement = _binary_group(
+        base.select("score_id", "resident_id", "feature_cutoff")
+        .join(
+            incidents.select("resident_id", "incident_type", "occurred_at"),
+            on="resident_id",
+            how="left",
+        )
+        .filter(pl.col("incident_type") == "Elopement")
+        .filter(pl.col("occurred_at") <= pl.col("feature_cutoff")),
+        "rule_prior_elopement",
+    )
+    out = (
+        out.join(dementia, on="score_id", how="left")
+        .join(wander, on="score_id", how="left")
+        .join(prior_elopement, on="score_id", how="left")
+        .join(residents.select("resident_id", "admission_date"), on="resident_id", how="left")
+        .with_columns(
+            pl.col("rule_dementia").fill_null(0),
+            pl.col("rule_wander_tag").fill_null(0),
+            pl.col("rule_prior_elopement").fill_null(0),
+            rule_new_admission=(
+                ((pl.col("window_start") - pl.col("admission_date")).dt.total_days() >= 0)
+                & ((pl.col("window_start") - pl.col("admission_date")).dt.total_days() <= 90)
+            )
+            .fill_null(False)
+            .cast(pl.Int8),
+        )
+        .drop("admission_date")
+    )
+
+    elopement_rule_cols = [
+        "rule_dementia",
+        "rule_wander_tag",
+        "rule_prior_elopement",
+        "rule_new_admission",
+    ]
+    out = out.with_columns(
+        elopement_rule_score=pl.sum_horizontal(elopement_rule_cols),
+    ).with_columns(
+        elopement_flag=(pl.col("elopement_rule_score") >= 2).cast(pl.Int8)
+    )
+
+    out = out.with_columns(
+        med_error_rule_probability=pl.when(pl.col("med_error_flag") == 1)
+        .then(pl.lit(float(precisions["med_error"])))
+        .otherwise(0.0),
+        elopement_rule_probability=pl.when(pl.col("elopement_flag") == 1)
+        .then(pl.lit(float(precisions["elopement"])))
+        .otherwise(0.0),
+    ).with_columns(
+        med_error_rule_expected_cost=pl.col("med_error_rule_probability")
+        * AVG_CLAIM_COST["med_error"],
+        elopement_rule_expected_cost=pl.col("elopement_rule_probability")
+        * AVG_CLAIM_COST["elopement"],
+    )
+
+    return out
+
+
+def score_rules_for_spine(spine: pl.DataFrame) -> pl.DataFrame:
+    """Load raw inputs and score point-in-time rules for a scoring spine."""
+
+    residents, incidents, diagnoses, medications, doc_tags = load_raw()
+    return score_point_in_time_rules(
+        spine=spine,
+        residents=residents,
+        incidents=incidents,
+        diagnoses=diagnoses,
+        medications=medications,
+        document_tags=doc_tags,
+    )
+
+
 def main():
     print("Loading raw tables...")
-    residents, incidents, diagnoses, medications, orders, needs, doc_tags = load_raw()
+    residents, incidents, diagnoses, medications, doc_tags = load_raw()
     print(f"  {residents.shape[0]:,} residents")
 
     results = []
@@ -398,12 +547,6 @@ def main():
         residents, incidents, diagnoses, medications, doc_tags
     )
     results.append(validate_rule(df_med, rules_med, flag_med, actual_med, "Medication Errors"))
-
-    # Choking
-    df_choke, rules_choke, flag_choke, actual_choke = choking_rules(
-        residents, incidents, diagnoses, orders, doc_tags
-    )
-    results.append(validate_rule(df_choke, rules_choke, flag_choke, actual_choke, "Choking"))
 
     # Elopement
     df_elop, rules_elop, flag_elop, actual_elop = elopement_rules(

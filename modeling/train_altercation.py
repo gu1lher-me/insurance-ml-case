@@ -14,8 +14,14 @@ Usage:
     python modeling/train_altercation.py
 """
 
+import argparse
+import sys
 from datetime import datetime
 from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 import matplotlib
 import matplotlib.pyplot as plt
@@ -25,19 +31,27 @@ import mlflow.sklearn
 import numpy as np
 import pandas as pd
 import polars as pl
+import optuna
 from catboost import CatBoostClassifier
+from scipy.stats import ks_2samp
 from sklearn.calibration import CalibratedClassifierCV, calibration_curve
 from sklearn.metrics import (auc, brier_score_loss, log_loss,
                              precision_recall_curve, roc_auc_score, roc_curve)
 from sklearn.model_selection import StratifiedKFold
 
+from modeling.hyperparameter_tuning import (
+    load_hyperparameters,
+    save_hyperparameters,
+    suggest_catboost_params,
+)
+
 matplotlib.use("Agg")
 
 # ─── Configuration ─────────────────────────────────────────────────────────────
 
-ROOT = Path(__file__).resolve().parent.parent
 RAW = ROOT / "data" / "raw"
 ARTIFACTS_DIR = ROOT / "modeling" / "artifacts"
+HYPERPARAMETERS_DIR = ROOT / "data" / "model_hyperparameters"
 MLFLOW_TRACKING_DIR = ROOT / "mlruns"
 ARTIFACTS_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -51,6 +65,27 @@ def configure_mlflow():
     MLFLOW_TRACKING_DIR.mkdir(parents=True, exist_ok=True)
     mlflow.set_tracking_uri(MLFLOW_TRACKING_DIR.resolve().as_uri())
     mlflow.set_experiment(EXPERIMENT_NAME)
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description="Train the CatBoost altercation risk model."
+    )
+    parser.add_argument(
+        "--tune-hyperparameters",
+        action="store_true",
+        help="Run Optuna before training and use the best CatBoost params.",
+    )
+    parser.add_argument(
+        "--hyperparameter-trials",
+        "--optuna-trials",
+        "--n-trials",
+        dest="hyperparameter_trials",
+        type=int,
+        default=10,
+        help="Number of Optuna trials when tuning is enabled.",
+    )
+    return parser.parse_args()
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -72,7 +107,14 @@ def load_raw():
 # ═══════════════════════════════════════════════════════════════════════════════
 
 
-def build_altercation_dataset(residents, incidents, diagnoses, needs, doc_tags):
+def build_altercation_dataset(
+    residents,
+    incidents,
+    diagnoses,
+    needs,
+    doc_tags,
+    signal_end=SIGNAL_END,
+):
     """Build a resident-level dataset with altercation label + features."""
 
     # ── Target: has_altercation ───────────────────────────────────────────────
@@ -93,12 +135,12 @@ def build_altercation_dataset(residents, incidents, diagnoses, needs, doc_tags):
 
     # ── Demographics ─────────────────────────────────────────────────────────
     base = base.with_columns(
-        age=((pl.lit(SIGNAL_END) - pl.col("date_of_birth")).dt.total_days() / 365.25).round(1),
+        age=((pl.lit(signal_end) - pl.col("date_of_birth")).dt.total_days() / 365.25).round(1),
         los_days=(
             pl.min_horizontal(
-                pl.col("discharge_date").fill_null(pl.lit(SIGNAL_END)),
-                pl.col("deceased_date").fill_null(pl.lit(SIGNAL_END)),
-                pl.lit(SIGNAL_END),
+                pl.col("discharge_date").fill_null(pl.lit(signal_end)),
+                pl.col("deceased_date").fill_null(pl.lit(signal_end)),
+                pl.lit(signal_end),
             ) - pl.col("admission_date")
         ).dt.total_days(),
     )
@@ -237,10 +279,33 @@ def build_altercation_dataset(residents, incidents, diagnoses, needs, doc_tags):
 # ═══════════════════════════════════════════════════════════════════════════════
 
 
+def compute_ks_metrics(y_true, y_prob):
+    """KS statistic from score distributions plus the maximizing score threshold."""
+    positive_scores = y_prob[y_true == 1]
+    negative_scores = y_prob[y_true == 0]
+    ks_result = ks_2samp(positive_scores, negative_scores)
+
+    fpr, tpr, thresholds = roc_curve(y_true, y_prob)
+    ks_values = tpr - fpr
+
+    finite_thresholds = np.isfinite(thresholds)
+    if finite_thresholds.any():
+        best_idx = int(np.argmax(np.where(finite_thresholds, ks_values, -np.inf)))
+    else:
+        best_idx = int(np.argmax(ks_values))
+
+    return {
+        "ks_statistic": float(ks_result.statistic),
+        "ks_max_threshold": float(thresholds[best_idx]),
+    }
+
+
 def compute_metrics(y_true, y_prob):
     prec_curve, rec_curve, _ = precision_recall_curve(y_true, y_prob)
+    ks_metrics = compute_ks_metrics(y_true, y_prob)
     return {
         "roc_auc": roc_auc_score(y_true, y_prob),
+        **ks_metrics,
         "log_loss": log_loss(y_true, y_prob),
         "brier_score": brier_score_loss(y_true, y_prob),
         "pr_auc": auc(rec_curve, prec_curve),
@@ -308,7 +373,45 @@ def plot_calibration_comparison(results, y_true, title):
 # ═══════════════════════════════════════════════════════════════════════════════
 
 
-def run_stratified_cv(X, y, feature_cols, n_splits=5):
+def make_catboost(model_params=None):
+    params = {
+        "verbose": 0,
+        "random_seed": RANDOM_SEED,
+        "allow_writing_files": False,
+        "loss_function": "Logloss",
+        "depth": 4,
+        "l2_leaf_reg": 5,
+        "iterations": 300,
+    }
+    if model_params:
+        params.update(model_params)
+    return CatBoostClassifier(**params)
+
+
+def tune_stratified_hyperparameters(X, y, n_trials, n_splits=5):
+    skf = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=RANDOM_SEED)
+
+    def objective(trial):
+        model_params = suggest_catboost_params(trial)
+        oof_prob = np.zeros(len(y))
+
+        for train_idx, test_idx in skf.split(X, y):
+            model = make_catboost(model_params)
+            model.fit(X.iloc[train_idx], y[train_idx])
+            oof_prob[test_idx] = model.predict_proba(X.iloc[test_idx])[:, 1]
+
+        return log_loss(y, oof_prob, labels=[0, 1])
+
+    study = optuna.create_study(
+        direction="minimize",
+        study_name="altercation_catboost_logloss",
+        sampler=optuna.samplers.TPESampler(seed=RANDOM_SEED),
+    )
+    study.optimize(objective, n_trials=n_trials, show_progress_bar=True)
+    return study.best_params, study.best_value
+
+
+def run_stratified_cv(X, y, feature_cols, n_splits=5, model_params=None):
     """Stratified K-Fold CV (resident-level, no temporal structure needed)."""
     skf = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=RANDOM_SEED)
 
@@ -320,10 +423,7 @@ def run_stratified_cv(X, y, feature_cols, n_splits=5):
         X_train, X_test = X.iloc[train_idx], X.iloc[test_idx]
         y_train, y_test = y[train_idx], y[test_idx]
 
-        model = CatBoostClassifier(
-            verbose=0, random_seed=RANDOM_SEED, allow_writing_files=False,
-            depth=4, l2_leaf_reg=5, iterations=300,
-        )
+        model = make_catboost(model_params)
         model.fit(X_train, y_train)
         y_prob = model.predict_proba(X_test)[:, 1]
 
@@ -348,21 +448,15 @@ def run_stratified_cv(X, y, feature_cols, n_splits=5):
     return fold_df, pooled_metrics
 
 
-def train_final_model(X, y, feature_cols):
+def train_final_model(X, y, feature_cols, model_params=None):
     """Train on full dataset: uncalibrated + calibrated with CV."""
     # Uncalibrated
-    model = CatBoostClassifier(
-        verbose=0, random_seed=RANDOM_SEED, allow_writing_files=False,
-        depth=4, l2_leaf_reg=5, iterations=300,
-    )
+    model = make_catboost(model_params)
     model.fit(X, y)
 
     # Calibrated (internal CV)
     cal_model = CalibratedClassifierCV(
-        estimator=CatBoostClassifier(
-            verbose=0, random_seed=RANDOM_SEED, allow_writing_files=False,
-            depth=4, l2_leaf_reg=5, iterations=300,
-        ),
+        estimator=make_catboost(model_params),
         cv=5, method="sigmoid",
     )
     cal_model.fit(X, y)
@@ -376,6 +470,10 @@ def train_final_model(X, y, feature_cols):
 
 
 def main():
+    args = parse_args()
+    if args.hyperparameter_trials < 1:
+        raise ValueError("--hyperparameter-trials must be at least 1")
+
     print("Loading raw tables...")
     residents, incidents, diagnoses, needs, doc_tags = load_raw()
 
@@ -392,12 +490,47 @@ def main():
 
     configure_mlflow()
 
+    model_params = None
+    if args.tune_hyperparameters:
+        print(
+            f"\n  Optional step: Optuna tuning "
+            f"({args.hyperparameter_trials} trials, minimize logloss)"
+        )
+        model_params, best_value = tune_stratified_hyperparameters(
+            X, y, args.hyperparameter_trials
+        )
+        params_path = save_hyperparameters(
+            HYPERPARAMETERS_DIR,
+            "altercation",
+            model_params,
+            best_value,
+            args.hyperparameter_trials,
+            metadata={
+                "algorithm": "catboost",
+                "cv_type": "stratified_kfold",
+                "n_splits": 5,
+                "n_features": len(feature_cols),
+                "model_level": "resident",
+            },
+        )
+        print(f"  Best logloss={best_value:.6f}; saved params to {params_path}")
+    else:
+        model_params, params_path = load_hyperparameters(
+            HYPERPARAMETERS_DIR, "altercation"
+        )
+        if model_params:
+            print(f"\n  Loaded saved hyperparameters from {params_path}")
+        else:
+            print(f"\n  No saved hyperparameters found at {params_path}")
+
     # ── Stratified 5-Fold CV ─────────────────────────────────────────────────
     print("\n  Phase 1: Stratified 5-Fold CV")
-    fold_df, pooled_metrics = run_stratified_cv(X, y, feature_cols)
+    fold_df, pooled_metrics = run_stratified_cv(X, y, feature_cols, model_params=model_params)
 
     print(
         f"\n  CV pooled: ROC-AUC={pooled_metrics['roc_auc']:.4f}"
+        f"  KS={pooled_metrics['ks_statistic']:.4f}"
+        f"  KS-threshold={pooled_metrics['ks_max_threshold']:.4f}"
         f"  Brier={pooled_metrics['brier_score']:.6f}"
         f"  PR-AUC={pooled_metrics['pr_auc']:.4f}"
     )
@@ -416,9 +549,14 @@ def main():
             "n_splits": 5,
             "n_features": len(feature_cols),
             "model_level": "resident",
+            "tuned_hyperparameters": bool(model_params),
         })
+        if model_params:
+            mlflow.log_params(
+                {f"catboost_{k}": v for k, v in model_params.items()}
+            )
         mlflow.log_metrics({f"cv_pooled_{k}": v for k, v in pooled_metrics.items()})
-        for m in ["roc_auc", "log_loss", "brier_score", "pr_auc"]:
+        for m in ["roc_auc", "ks_statistic", "ks_max_threshold", "log_loss", "brier_score", "pr_auc"]:
             mlflow.log_metric(f"cv_{m}_mean", fold_df[m].mean())
             mlflow.log_metric(f"cv_{m}_std", fold_df[m].std())
 
@@ -428,30 +566,19 @@ def main():
 
     # ── Final model on full dataset ──────────────────────────────────────────
     print("\n  Phase 2: Final Model (full dataset)")
-    model, cal_model = train_final_model(X, y, feature_cols)
+    model, cal_model = train_final_model(X, y, feature_cols, model_params)
 
-    # Use CV pooled predictions for evaluation & calibration plots
-    y_prob_uncal = np.array(pooled_metrics.pop("_y_prob", []))
-    # Re-run CV to get pooled predictions for plots
-    _, pooled = run_stratified_cv(X, y, feature_cols)
-    # For final model artifacts, use OOF predictions from CV
-    # Re-generate: collect OOF predictions
+    # For final model artifacts, use OOF predictions from CV.
     skf = StratifiedKFold(n_splits=5, shuffle=True, random_state=RANDOM_SEED)
     oof_prob_uncal = np.zeros(len(y))
     oof_prob_cal = np.zeros(len(y))
     for train_idx, test_idx in skf.split(X, y):
-        m = CatBoostClassifier(
-            verbose=0, random_seed=RANDOM_SEED, allow_writing_files=False,
-            depth=4, l2_leaf_reg=5, iterations=300,
-        )
+        m = make_catboost(model_params)
         m.fit(X.iloc[train_idx], y[train_idx])
         oof_prob_uncal[test_idx] = m.predict_proba(X.iloc[test_idx])[:, 1]
 
         cm = CalibratedClassifierCV(
-            estimator=CatBoostClassifier(
-                verbose=0, random_seed=RANDOM_SEED, allow_writing_files=False,
-                depth=4, l2_leaf_reg=5, iterations=300,
-            ),
+            estimator=make_catboost(model_params),
             cv=3, method="sigmoid",
         )
         cm.fit(X.iloc[train_idx], y[train_idx])
@@ -460,8 +587,18 @@ def main():
     metrics_uncal = compute_metrics(y, oof_prob_uncal)
     metrics_cal = compute_metrics(y, oof_prob_cal)
 
-    print(f"    Uncalibrated OOF -> ROC-AUC: {metrics_uncal['roc_auc']:.4f}  Brier: {metrics_uncal['brier_score']:.6f}")
-    print(f"    Calibrated OOF   -> ROC-AUC: {metrics_cal['roc_auc']:.4f}  Brier: {metrics_cal['brier_score']:.6f}")
+    print(
+        f"    Uncalibrated OOF -> ROC-AUC: {metrics_uncal['roc_auc']:.4f}  "
+        f"KS: {metrics_uncal['ks_statistic']:.4f}  "
+        f"KS-threshold: {metrics_uncal['ks_max_threshold']:.4f}  "
+        f"Brier: {metrics_uncal['brier_score']:.6f}"
+    )
+    print(
+        f"    Calibrated OOF   -> ROC-AUC: {metrics_cal['roc_auc']:.4f}  "
+        f"KS: {metrics_cal['ks_statistic']:.4f}  "
+        f"KS-threshold: {metrics_cal['ks_max_threshold']:.4f}  "
+        f"Brier: {metrics_cal['brier_score']:.6f}"
+    )
 
     # Log uncalibrated final
     with mlflow.start_run(run_name="altercation_catboost_final"):
@@ -476,7 +613,12 @@ def main():
             "n_residents": len(y),
             "positive_rate": round(float(y.mean()), 5),
             "model_level": "resident",
+            "tuned_hyperparameters": bool(model_params),
         })
+        if model_params:
+            mlflow.log_params(
+                {f"catboost_{k}": v for k, v in model_params.items()}
+            )
         mlflow.log_metrics(metrics_uncal)
 
         fig = plot_roc(y, oof_prob_uncal, "ROC — Altercation — CatBoost (OOF)")
@@ -520,7 +662,12 @@ def main():
             "n_features": len(feature_cols),
             "n_residents": len(y),
             "positive_rate": round(float(y.mean()), 5),
+            "tuned_hyperparameters": bool(model_params),
         })
+        if model_params:
+            mlflow.log_params(
+                {f"catboost_{k}": v for k, v in model_params.items()}
+            )
         mlflow.log_metrics(metrics_cal)
 
         fig = plot_roc(y, oof_prob_cal, "ROC — Altercation — CatBoost Calibrated (OOF)")

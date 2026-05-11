@@ -17,6 +17,7 @@ Feature groups (all point-in-time, data ≤ feature_cutoff = t − 1d):
   - Diagnoses: active ICD-10 flags, fall-risk & RTH-risk code groups
   - Incident history: prior counts by type × 7d/30d/90d/all-time
   - RTH history: prior transfer counts × 30d/90d/all-time
+  - Admission context: active/recent SNF admission status and hospital-stay context
   - Care needs: open need counts by category
   - Lab reports: abnormal/critical counts × 14d/30d
   - Document tags: binary flags for risk-relevant clinical tags
@@ -26,10 +27,16 @@ Usage:
     python feature_engineering/build_falls_rth_matrix_falls_rts_data.py
 """
 
+import argparse
 from datetime import datetime, timedelta
 from pathlib import Path
 
 import polars as pl
+
+try:
+    from .admission_features import compute_admission_context
+except ImportError:  # pragma: no cover - allows direct script execution
+    from admission_features import compute_admission_context
 
 # ─── Configuration ─────────────────────────────────────────────────────────────
 
@@ -120,6 +127,7 @@ def load_tables():
             (pl.col("planned_flag") == False) | pl.col("planned_flag").is_null()
         )
     )
+    hospital_admissions = pl.read_parquet(RAW / "hospital_admissions.parquet")
     needs = (
         pl.read_parquet(RAW / "needs.parquet")
         .filter(pl.col("strikeout") == False)
@@ -130,7 +138,32 @@ def load_tables():
         .filter(pl.col("deleted_at").is_null())
     )
 
-    return residents, vitals, incidents, diagnoses, hospital_transfers, needs, lab_reports, document_tags
+    return (
+        residents,
+        vitals,
+        incidents,
+        diagnoses,
+        hospital_transfers,
+        hospital_admissions,
+        needs,
+        lab_reports,
+        document_tags,
+    )
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description="Build 7-day historical features and labels for falls/RTH."
+    )
+    parser.add_argument("--signal-start", default=SIGNAL_START.date().isoformat())
+    parser.add_argument("--signal-end", default=SIGNAL_END.date().isoformat())
+    parser.add_argument("--feature-out", default=str(FEATURE_OUT))
+    parser.add_argument("--model-out", default=str(MODEL_OUT))
+    return parser.parse_args()
+
+
+def _parse_date(value):
+    return datetime.strptime(value, "%Y-%m-%d")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -589,8 +622,27 @@ def compute_document_tags(obs, document_tags):
 
 
 def main():
+    global SIGNAL_START, SIGNAL_END, FEATURE_OUT, MODEL_OUT
+
+    args = parse_args()
+    SIGNAL_START = _parse_date(args.signal_start)
+    SIGNAL_END = _parse_date(args.signal_end)
+    FEATURE_OUT = Path(args.feature_out)
+    MODEL_OUT = Path(args.model_out)
+
     print("Loading raw tables...")
-    residents, vitals, incidents, diagnoses, transfers, needs, labs, doc_tags = load_tables()
+    print(f"  Signal window: {SIGNAL_START.date()} -> {SIGNAL_END.date()}")
+    (
+        residents,
+        vitals,
+        incidents,
+        diagnoses,
+        transfers,
+        admissions,
+        needs,
+        labs,
+        doc_tags,
+    ) = load_tables()
 
     print("Building resident observation bounds...")
     res_bounds = build_resident_obs_bounds(residents)
@@ -624,6 +676,9 @@ def main():
     rth_hist = compute_rth_history(obs, transfers)
     print("  RTH history done")
 
+    admission_feats = compute_admission_context(obs, admissions)
+    print("  Admission context done")
+
     need_feats = compute_needs(obs, needs)
     print("  Care needs done")
 
@@ -641,6 +696,7 @@ def main():
         .join(dx, on=join_keys, how="left")
         .join(hist, on=join_keys, how="left")
         .join(rth_hist, on=join_keys, how="left")
+        .join(admission_feats, on=join_keys, how="left")
         .join(need_feats, on=join_keys, how="left")
         .join(lab_feats, on=join_keys, how="left")
         .join(tag_feats, on=join_keys, how="left")

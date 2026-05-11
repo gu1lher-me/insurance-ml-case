@@ -361,6 +361,53 @@ These extend incident records with contextual detail:
 - **`factors`** and **`injuries`**: No direct `resident_id` — must join via `incidents.incident_id` first.
 - **`hospital_admissions.emergency_flag`**: Column exists but is 100% null — not usable. Use `hospital_transfers.emergency_flag` instead.
 
+### Hospital admissions feature relevance
+
+`hospital_admissions` should be treated as SNF admission/status context, not as
+a claims event table. The useful fields are `admission_status`,
+`effective_date`, `ineffective_date`, and `hospital_stay_to`.
+
+Key findings:
+
+- Coverage is moderate: 2,945 rows for 1,873 residents across 89 facilities
+  (62.4% of residents).
+- Status values are mostly `Post Acute` (1,659 rows) and
+  `Chronic Long-Term` (1,207 rows), with 79 nulls.
+- `emergency_flag` is unusable because it is 100% null.
+- `hospital_stay_to` is present in 1,467 rows. When present, the median gap
+  from `hospital_stay_to` to `effective_date` is 0 days, so it usually marks a
+  same-day return/admission after a hospital stay.
+- The table overlaps with `hospital_transfers`, but does not duplicate it:
+  61.2% of transfers are followed by an admission row within 7 days, while only
+  37.4% of admission rows have a prior transfer within 7 days.
+
+Point-in-time signal check on pre-holdout windows:
+
+| Candidate feature present | Target | Base rate | Feature-present rate | Lift |
+|---|---:|---:|---:|---:|
+| Any active admission row | `rth_7d` | 0.82% | 2.37% | 2.90x |
+| Admission in prior 30d | `rth_7d` | 0.82% | 2.86% | 3.50x |
+| Chronic admission in prior 30d | `rth_7d` | 0.82% | 3.45% | 4.23x |
+| Active post-acute admission | `fall_7d` | 2.39% | 5.44% | 2.28x |
+| Post-acute admission in prior 30d | `fall_7d` | 2.39% | 6.52% | 2.73x |
+| Post-acute admission in prior 30d | `wound_14d` | 1.32% | 3.53% | 2.68x |
+| Hospital-stay-to in prior 30d | `wound_14d` | 1.32% | 3.45% | 2.62x |
+
+Recommended feature candidates:
+
+- Active admission flags at `feature_cutoff`: any active admission,
+  active post-acute, active chronic long-term.
+- Recent admission counts: admissions in the prior 30d/90d, split by
+  `admission_status`.
+- Recent hospital-stay context: non-null `hospital_stay_to` in the prior
+  30d/90d.
+
+Implementation guardrail: use only rows with
+`effective_date <= feature_cutoff` and `created_at <= feature_cutoff`. The
+median `created_at - effective_date` lag is 0 days, but 133 rows lag by more
+than 7 days and 104 lag by more than 30 days, so relying only on
+`effective_date` can leak late-entered information.
+
 ---
 
 ## 2. Incidents
@@ -630,9 +677,9 @@ Computed for the **Jul 2023–Jan 2025 window** with the **revised time horizons
 |---|---|---|---|---|---|
 | Fall (H1) | 7 days | 2,454 | ~1.0% | ~100:1 | ✅ Feasible |
 | RTH (H2) | 7 days | 1,703 | ~0.69% | ~145:1 | ✅ Feasible |
-| Altercations (H4) | 7 days | ~180 | ~0.07% | ~1,400:1 | ⚠️ Borderline |
+| Altercations (H4) | 7 days | 148 positive windows | ~0.24% | ~417:1 | ⚠️ Borderline |
 | Med Errors | 7 days | ~35 | ~0.014% | ~7,000:1 | ❌ Impossible |
-| Choking | 7 days | ~8 | ~0.003% | ~30,000:1 | ❌ Impossible |
+| Choking | 7 days | ~8 | ~0.003% | ~30,000:1 | Excluded from claim-backed model |
 
 ### Bi-weekly observation windows (~123,000 resident-fortnights)
 
@@ -646,7 +693,7 @@ Computed for the **Jul 2023–Jan 2025 window** with the **revised time horizons
 |---|---|---|---|---|---|
 | Elopement | 30 days | 7 | ~0.012% | ~8,000:1 | ❌ Impossible |
 
-**Key insight:** Shorter horizons (7d vs 30d) increase imbalance ~4×. Falls and RTH remain learnable; wounds are harder but feasible. Altercations can be approached as resident-level classification (4.2% prevalence) rather than temporal window prediction. Med errors, choking, and elopement require business rules.
+**Key insight:** Shorter horizons (7d vs 30d) increase imbalance ~4×. Falls and RTH remain learnable; wounds are harder but feasible. Altercations can be approached as resident-level classification (4.2% prevalence) rather than temporal window prediction. Med errors and elopement require business rules. Choking is present in raw incidents but excluded because it is not in the assignment's claim breakdown.
 
 **Handling strategy (Tier 1 ML models):**
 - LightGBM: `scale_pos_weight = neg_count / pos_count`
@@ -667,9 +714,8 @@ Computed as: `events_per_100_residents_per_year × avg_cost_per_event`
 | H3 — Wound | $4,000 | ~$104k | ~$21k |
 | H4 — Altercation | $2,500 | ~$25k | ~$5k |
 | Rules — Med Error | $5,000 | ~$15k | ~$3k |
-| Rules — Choking | $2,500 | ~$1k | negligible |
 | Rules — Elopement | $2,500 | ~$1k | negligible |
-| **Total** | | **~$1,189k** | **~$238k** |
+| **Total** | | **~$1,188k** | **~$237k** |
 
 > RTH is the clear priority for business impact. A 20% reduction in RTH events per 100 residents saves ~$151k/year — roughly 3× the value of equivalent fall reduction. The rule-based alerts for rare events add minimal $ but address liability/compliance concerns.
 
@@ -683,13 +729,13 @@ Computed as: `events_per_100_residents_per_year × avg_cost_per_event`
 |---|---|---|---|
 | **Tier 1 — Full ML** | H1 (Falls 7d), H2 (RTH 7d), H3 (Wounds 14d) | LightGBM binary classifiers, temporal CV, SHAP | 589–2,505 |
 | **Tier 2 — Hybrid ML + Rules** | H4 (Altercations 7d) | Resident-level risk score (LR/GBM) + rule-based triggers | 228 (127 residents) |
-| **Tier 3 — Business Rules Only** | Med Errors, Choking, Elopement | Rule-based flags from diagnoses, orders, document_tags | 7–44 |
+| **Tier 3 — Business Rules Only** | Med Errors, Elopement | Rule-based flags from diagnoses, orders, document_tags | 7–44 |
 | **Tier 4 — Composite Score** | All combined | Calibrated probabilities + rule flags → expected cost ranking | — |
 
 ### Why Not Group Rare Events Into One Model?
 
-- Combined volume (288) is still too sparse at weekly granularity
-- Clinically heterogeneous: altercations (behavioral), med errors (pharmacological), choking (anatomical), elopement (cognitive)
+- Combined volume (279 modeled non-Tier-1 events) is still too sparse at weekly granularity
+- Clinically heterogeneous: altercations (behavioral), med errors (pharmacological), elopement (cognitive)
 - Different interventions needed — "something bad might happen" is not actionable
 - A grouped model would be dominated by altercations (79% of group) and learn nothing about the other types
 
@@ -710,7 +756,6 @@ Computed as: `events_per_100_residents_per_year × avg_cost_per_event`
 | Event | Key Rules | Data Sources |
 |---|---|---|
 | **Med Errors** | Polypharmacy (>15 concurrent), new pharmacy orders in 7d, cognitive impairment dx, "Psychotropic Medication Monitoring" need, prior med error, high missed/refused rate | `medications`, `physician_orders`, `diagnoses`, `needs`, `incidents` |
-| **Choking** | Dysphagia dx (R13.x — 465 residents!), dietary orders, speech therapy active, neurological dx (Parkinson's, stroke), aspiration document_tags | `diagnoses`, `physician_orders`, `therapy_tracks`, `document_tags` |
 | **Elopement** | Dementia/Alzheimer's dx, wandering/elopement document_tags, prior elopement, cognitive ADL decline, new admission (first 30d) | `diagnoses`, `document_tags`, `incidents`, `adl_responses`, `residents` |
 
 ### Data Pipeline
@@ -723,6 +768,7 @@ Prediction gap (embargo): 1 day (features use data ≤ t-1d, label starts at t)
 Feature groups (by coverage):
   HIGH  (~82%): vitals rolling features (3d, 7d, 14d lookback), diagnoses flags, history counts
   HIGH  (~83%): care plan needs by category
+  MED   (~62%): hospital_admissions status/context features
   MED   (~39%): lab report abnormal/critical counts
   MED   (~30%): RTH history, transfer outcomes
   MED   (~34%): document_tag semantic flags

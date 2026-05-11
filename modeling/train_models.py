@@ -18,9 +18,15 @@ Usage:
     python modeling/train_models.py
 """
 
+import argparse
+import sys
 import warnings
 from datetime import date, timedelta
 from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 import matplotlib
 import matplotlib.pyplot as plt
@@ -30,21 +36,29 @@ import mlflow.sklearn
 import numpy as np
 import pandas as pd
 import polars as pl
+import optuna
 from catboost import CatBoostClassifier
+from scipy.stats import ks_2samp
 from sklearn.calibration import CalibratedClassifierCV, calibration_curve
 from sklearn.metrics import (auc,  # f1_score,; precision_score,; recall_score,
                              brier_score_loss, log_loss,
                              precision_recall_curve, roc_auc_score, roc_curve)
+
+from modeling.hyperparameter_tuning import (
+    load_hyperparameters,
+    save_hyperparameters,
+    suggest_catboost_params,
+)
 
 matplotlib.use("Agg")
 warnings.filterwarnings("ignore")
 
 # ─── Configuration ─────────────────────────────────────────────────────────────
 
-ROOT = Path(__file__).resolve().parent.parent
 DATA_7D = ROOT / "data" / "processed" / "model_matrix_7d.parquet"
 DATA_14D = ROOT / "data" / "processed" / "model_matrix_14d.parquet"
 ARTIFACTS_DIR = ROOT / "modeling" / "artifacts"
+HYPERPARAMETERS_DIR = ROOT / "data" / "model_hyperparameters"
 MLFLOW_TRACKING_DIR = ROOT / "mlruns"
 ARTIFACTS_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -93,6 +107,27 @@ def configure_mlflow():
     mlflow.set_experiment(EXPERIMENT_NAME)
 
 
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description="Train CatBoost incident prediction models."
+    )
+    parser.add_argument(
+        "--tune-hyperparameters",
+        action="store_true",
+        help="Run Optuna before training each target and use the best CatBoost params.",
+    )
+    parser.add_argument(
+        "--hyperparameter-trials",
+        "--optuna-trials",
+        "--n-trials",
+        dest="hyperparameter_trials",
+        type=int,
+        default=10,
+        help="Number of Optuna trials per target when tuning is enabled.",
+    )
+    return parser.parse_args()
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 #  Data Loading
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -136,12 +171,34 @@ def get_fold_boundaries(df, horizon_days):
 # ═══════════════════════════════════════════════════════════════════════════════
 
 
-def compute_metrics(y_true, y_prob, threshold=0.5):
-    y_pred = (y_prob >= threshold).astype(int)
+def compute_ks_metrics(y_true, y_prob):
+    """KS statistic from score distributions plus the maximizing score threshold."""
+    positive_scores = y_prob[y_true == 1]
+    negative_scores = y_prob[y_true == 0]
+    ks_result = ks_2samp(positive_scores, negative_scores)
+
+    fpr, tpr, thresholds = roc_curve(y_true, y_prob)
+    ks_values = tpr - fpr
+
+    finite_thresholds = np.isfinite(thresholds)
+    if finite_thresholds.any():
+        best_idx = int(np.argmax(np.where(finite_thresholds, ks_values, -np.inf)))
+    else:
+        best_idx = int(np.argmax(ks_values))
+
+    return {
+        "ks_statistic": float(ks_result.statistic),
+        "ks_max_threshold": float(thresholds[best_idx]),
+    }
+
+
+def compute_metrics(y_true, y_prob):
     prec_curve, rec_curve, _ = precision_recall_curve(y_true, y_prob)
+    ks_metrics = compute_ks_metrics(y_true, y_prob)
 
     return {
         "roc_auc": roc_auc_score(y_true, y_prob),
+        **ks_metrics,
         "log_loss": log_loss(y_true, y_prob),
         "brier_score": brier_score_loss(y_true, y_prob),
         "pr_auc": auc(rec_curve, prec_curve),
@@ -252,16 +309,68 @@ def plot_cv_metric_over_time(fold_df, metric, title):
 # ═══════════════════════════════════════════════════════════════════════════════
 
 
-def make_catboost():
-    return CatBoostClassifier(
-        verbose=0,
-        random_seed=42,
-        allow_writing_files=False,
-    )
+def make_catboost(model_params=None):
+    params = {
+        "verbose": 0,
+        "random_seed": 42,
+        "allow_writing_files": False,
+        "loss_function": "Logloss",
+    }
+    if model_params:
+        params.update(model_params)
+    return CatBoostClassifier(**params)
 
 
 def _format_target(target):
     return TARGET_CONFIG[target]["display"]
+
+
+def tune_temporal_hyperparameters(df, target, feature_cols, horizon_days, n_trials):
+    boundaries = get_fold_boundaries(df, horizon_days)
+
+    def objective(trial):
+        model_params = suggest_catboost_params(trial)
+        all_y_true = []
+        all_y_prob = []
+
+        for boundary in boundaries:
+            test_end = boundary + timedelta(days=horizon_days)
+            train_df = df.filter(pl.col("window_end") <= boundary)
+            test_df = df.filter(
+                (pl.col("window_start") >= boundary)
+                & (pl.col("window_start") < test_end)
+            )
+
+            if test_df.shape[0] == 0:
+                continue
+
+            X_train = train_df.select(feature_cols).to_pandas()
+            y_train = train_df[target].to_numpy().ravel()
+            X_test = test_df.select(feature_cols).to_pandas()
+            y_test = test_df[target].to_numpy().ravel()
+
+            if len(np.unique(y_train)) < 2:
+                continue
+
+            model = make_catboost(model_params)
+            model.fit(X_train, y_train)
+            y_prob = model.predict_proba(X_test)[:, 1]
+
+            all_y_true.extend(y_test.tolist())
+            all_y_prob.extend(y_prob.tolist())
+
+        if not all_y_true:
+            return float("inf")
+
+        return log_loss(np.array(all_y_true), np.array(all_y_prob), labels=[0, 1])
+
+    study = optuna.create_study(
+        direction="minimize",
+        study_name=f"{target}_catboost_logloss",
+        sampler=optuna.samplers.TPESampler(seed=42),
+    )
+    study.optimize(objective, n_trials=n_trials, show_progress_bar=True)
+    return study.best_params, study.best_value
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -269,7 +378,7 @@ def _format_target(target):
 # ═══════════════════════════════════════════════════════════════════════════════
 
 
-def run_expanding_cv(df, target, feature_cols, horizon_days):
+def run_expanding_cv(df, target, feature_cols, horizon_days, model_params=None):
     """
     Expanding-window temporal CV.
 
@@ -312,7 +421,7 @@ def run_expanding_cv(df, target, feature_cols, horizon_days):
             )
             continue
 
-        model = make_catboost()
+        model = make_catboost(model_params)
         model.fit(X_train, y_train)
         y_prob = model.predict_proba(X_test)[:, 1]
 
@@ -344,7 +453,7 @@ def run_expanding_cv(df, target, feature_cols, horizon_days):
 # ═══════════════════════════════════════════════════════════════════════════════
 
 
-def train_final_model(df, target, feature_cols):
+def train_final_model(df, target, feature_cols, model_params=None):
     """Train on all pre-holdout data.  Return uncalibrated + calibrated models
     and their holdout predictions."""
     # Purging: same logic as CV — only keep training rows whose full label
@@ -359,7 +468,7 @@ def train_final_model(df, target, feature_cols):
 
     # Uncalibrated
     print("  Training final CatBoost (uncalibrated)...")
-    model = make_catboost()
+    model = make_catboost(model_params)
     model.fit(X_train, y_train)
     y_prob_uncal = model.predict_proba(X_holdout)[:, 1]
     metrics_uncal = compute_metrics(y_holdout, y_prob_uncal)
@@ -367,7 +476,7 @@ def train_final_model(df, target, feature_cols):
     # Calibrated (isotonic, CV=5)
     print("  Training final CatBoost (calibrated, isotonic CV=5)...")
     cal_model = CalibratedClassifierCV(
-        estimator=make_catboost(), cv=5, method="sigmoid"
+        estimator=make_catboost(model_params), cv=5, method="sigmoid"
     )
     cal_model.fit(X_train, y_train)
     y_prob_cal = cal_model.predict_proba(X_holdout)[:, 1]
@@ -395,6 +504,8 @@ def train_final_model(df, target, feature_cols):
 
 METRIC_NAMES = [
     "roc_auc",
+    "ks_statistic",
+    "ks_max_threshold",
     "log_loss",
     "brier_score",
     "pr_auc",
@@ -404,7 +515,9 @@ METRIC_NAMES = [
 ]
 
 
-def log_cv_run(target, fold_df, pooled_metrics, target_display, horizon_days):
+def log_cv_run(
+    target, fold_df, pooled_metrics, target_display, horizon_days, model_params=None
+):
     with mlflow.start_run(run_name=f"{target}_catboost_temporal_cv"):
         mlflow.set_tag("target", target)
         mlflow.set_tag("phase", "temporal_cv")
@@ -418,8 +531,13 @@ def log_cv_run(target, fold_df, pooled_metrics, target_display, horizon_days):
                 "n_folds": len(fold_df),
                 "fold_step": FOLD_STEP,
                 "min_train_weeks": MIN_TRAIN_WEEKS,
+                "tuned_hyperparameters": bool(model_params),
             }
         )
+        if model_params:
+            mlflow.log_params(
+                {f"catboost_{k}": v for k, v in model_params.items()}
+            )
 
         # Pooled metrics (computed on concatenated fold predictions)
         mlflow.log_metrics(
@@ -444,7 +562,7 @@ def log_cv_run(target, fold_df, pooled_metrics, target_display, horizon_days):
         plt.close(fig)
 
 
-def log_final_uncalibrated(target, res, feature_cols, target_display):
+def log_final_uncalibrated(target, res, feature_cols, target_display, model_params=None):
     with mlflow.start_run(run_name=f"{target}_catboost_final"):
         mlflow.set_tag("target", target)
         mlflow.set_tag("phase", "final_model")
@@ -460,8 +578,13 @@ def log_final_uncalibrated(target, res, feature_cols, target_display):
                 "holdout_size": res["holdout_size"],
                 "train_positive_rate": round(res["train_pos_rate"], 5),
                 "holdout_positive_rate": round(res["holdout_pos_rate"], 5),
+                "tuned_hyperparameters": bool(model_params),
             }
         )
+        if model_params:
+            mlflow.log_params(
+                {f"catboost_{k}": v for k, v in model_params.items()}
+            )
         mlflow.log_metrics(res["metrics_uncal"])
 
         # ROC
@@ -509,7 +632,7 @@ def log_final_uncalibrated(target, res, feature_cols, target_display):
         mlflow.catboost.log_model(res["model"], "model")
 
 
-def log_final_calibrated(target, res, feature_cols, target_display):
+def log_final_calibrated(target, res, feature_cols, target_display, model_params=None):
     with mlflow.start_run(run_name=f"{target}_catboost_final_calibrated"):
         mlflow.set_tag("target", target)
         mlflow.set_tag("phase", "final_model")
@@ -527,8 +650,13 @@ def log_final_calibrated(target, res, feature_cols, target_display):
                 "holdout_size": res["holdout_size"],
                 "train_positive_rate": round(res["train_pos_rate"], 5),
                 "holdout_positive_rate": round(res["holdout_pos_rate"], 5),
+                "tuned_hyperparameters": bool(model_params),
             }
         )
+        if model_params:
+            mlflow.log_params(
+                {f"catboost_{k}": v for k, v in model_params.items()}
+            )
         mlflow.log_metrics(res["metrics_cal"])
 
         # ROC
@@ -583,6 +711,10 @@ def log_calibration_comparison(target, res, target_display):
 
 
 def main():
+    args = parse_args()
+    if args.hyperparameter_trials < 1:
+        raise ValueError("--hyperparameter-trials must be at least 1")
+
     configure_mlflow()
 
     # Cache loaded data per file to avoid re-reading for targets sharing the same matrix
@@ -609,13 +741,49 @@ def main():
         print(f"  Horizon: {horizon_days}d, CV folds: {len(boundaries)}")
         print(f"{'=' * 60}")
 
+        model_params = None
+        if args.tune_hyperparameters:
+            print(
+                f"\n  Optional step: Optuna tuning "
+                f"({args.hyperparameter_trials} trials, minimize logloss)"
+            )
+            model_params, best_value = tune_temporal_hyperparameters(
+                df, target, feature_cols, horizon_days, args.hyperparameter_trials
+            )
+            params_path = save_hyperparameters(
+                HYPERPARAMETERS_DIR,
+                target,
+                model_params,
+                best_value,
+                args.hyperparameter_trials,
+                metadata={
+                    "algorithm": "catboost",
+                    "cv_type": "expanding_window",
+                    "horizon_days": horizon_days,
+                    "n_features": len(feature_cols),
+                },
+            )
+            print(f"  Best logloss={best_value:.6f}; saved params to {params_path}")
+        else:
+            model_params, params_path = load_hyperparameters(
+                HYPERPARAMETERS_DIR, target
+            )
+            if model_params:
+                print(f"\n  Loaded saved hyperparameters from {params_path}")
+            else:
+                print(f"\n  No saved hyperparameters found at {params_path}")
+
         # ── Phase 1: Expanding-Window Temporal CV ─────────────────────────────
         print("\n  Phase 1: Expanding-Window Temporal CV")
-        fold_df, pooled_metrics = run_expanding_cv(df, target, feature_cols, horizon_days)
+        fold_df, pooled_metrics = run_expanding_cv(
+            df, target, feature_cols, horizon_days, model_params
+        )
 
         print(
             f"\n  CV pooled metrics:"
             f"  ROC-AUC={pooled_metrics['roc_auc']:.4f}"
+            f"  KS={pooled_metrics['ks_statistic']:.4f}"
+            f"  KS-threshold={pooled_metrics['ks_max_threshold']:.4f}"
             f"  Brier={pooled_metrics['brier_score']:.6f}"
             f"  PR-AUC={pooled_metrics['pr_auc']:.4f}"
         )
@@ -624,23 +792,29 @@ def main():
             f"{fold_df['roc_auc'].mean():.4f} ± {fold_df['roc_auc'].std():.4f}"
         )
 
-        log_cv_run(target, fold_df, pooled_metrics, target_display, horizon_days)
+        log_cv_run(
+            target, fold_df, pooled_metrics, target_display, horizon_days, model_params
+        )
 
         # ── Phase 2: Final Model + Holdout ────────────────────────────────────
         print("\n  Phase 2: Final Model + Holdout Evaluation")
-        res = train_final_model(df, target, feature_cols)
+        res = train_final_model(df, target, feature_cols, model_params)
 
         print(
             f"    Uncalibrated -> ROC-AUC: {res['metrics_uncal']['roc_auc']:.4f}  "
+            f"KS: {res['metrics_uncal']['ks_statistic']:.4f}  "
+            f"KS-threshold: {res['metrics_uncal']['ks_max_threshold']:.4f}  "
             f"Brier: {res['metrics_uncal']['brier_score']:.6f}"
         )
         print(
             f"    Calibrated   -> ROC-AUC: {res['metrics_cal']['roc_auc']:.4f}  "
+            f"KS: {res['metrics_cal']['ks_statistic']:.4f}  "
+            f"KS-threshold: {res['metrics_cal']['ks_max_threshold']:.4f}  "
             f"Brier: {res['metrics_cal']['brier_score']:.6f}"
         )
 
-        log_final_uncalibrated(target, res, feature_cols, target_display)
-        log_final_calibrated(target, res, feature_cols, target_display)
+        log_final_uncalibrated(target, res, feature_cols, target_display, model_params)
+        log_final_calibrated(target, res, feature_cols, target_display, model_params)
         log_calibration_comparison(target, res, target_display)
 
         print(f"  Calibration comparison saved.")

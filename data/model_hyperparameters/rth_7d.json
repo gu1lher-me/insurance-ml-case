@@ -1,0 +1,23 @@
+{
+  "best_value": 0.047600599495071026,
+  "created_at": "2026-05-10T02:36:43.008163+00:00",
+  "metadata": {
+    "algorithm": "catboost",
+    "cv_type": "expanding_window",
+    "horizon_days": 7,
+    "n_features": 211
+  },
+  "model": "rth_7d",
+  "n_trials": 10,
+  "objective": "minimize",
+  "objective_metric": "log_loss",
+  "params": {
+    "colsample_bylevel": 0.1185260448662222,
+    "depth": 5,
+    "l2_leaf_reg": 18.276027831785726,
+    "learning_rate": 0.05399484409787434,
+    "min_data_in_leaf": 22,
+    "random_strength": 8.324426408004218,
+    "subsample": 0.737265320016441
+  }
+}
