@@ -361,6 +361,53 @@ These extend incident records with contextual detail:
 - **`factors`** and **`injuries`**: No direct `resident_id` — must join via `incidents.incident_id` first.
 - **`hospital_admissions.emergency_flag`**: Column exists but is 100% null — not usable. Use `hospital_transfers.emergency_flag` instead.
 
+### Hospital admissions feature relevance
+
+`hospital_admissions` should be treated as SNF admission/status context, not as
+a claims event table. The useful fields are `admission_status`,
+`effective_date`, `ineffective_date`, and `hospital_stay_to`.
+
+Key findings:
+
+- Coverage is moderate: 2,945 rows for 1,873 residents across 89 facilities
+  (62.4% of residents).
+- Status values are mostly `Post Acute` (1,659 rows) and
+  `Chronic Long-Term` (1,207 rows), with 79 nulls.
+- `emergency_flag` is unusable because it is 100% null.
+- `hospital_stay_to` is present in 1,467 rows. When present, the median gap
+  from `hospital_stay_to` to `effective_date` is 0 days, so it usually marks a
+  same-day return/admission after a hospital stay.
+- The table overlaps with `hospital_transfers`, but does not duplicate it:
+  61.2% of transfers are followed by an admission row within 7 days, while only
+  37.4% of admission rows have a prior transfer within 7 days.
+
+Point-in-time signal check on pre-holdout windows:
+
+| Candidate feature present | Target | Base rate | Feature-present rate | Lift |
+|---|---:|---:|---:|---:|
+| Any active admission row | `rth_7d` | 0.82% | 2.37% | 2.90x |
+| Admission in prior 30d | `rth_7d` | 0.82% | 2.86% | 3.50x |
+| Chronic admission in prior 30d | `rth_7d` | 0.82% | 3.45% | 4.23x |
+| Active post-acute admission | `fall_7d` | 2.39% | 5.44% | 2.28x |
+| Post-acute admission in prior 30d | `fall_7d` | 2.39% | 6.52% | 2.73x |
+| Post-acute admission in prior 30d | `wound_14d` | 1.32% | 3.53% | 2.68x |
+| Hospital-stay-to in prior 30d | `wound_14d` | 1.32% | 3.45% | 2.62x |
+
+Recommended feature candidates:
+
+- Active admission flags at `feature_cutoff`: any active admission,
+  active post-acute, active chronic long-term.
+- Recent admission counts: admissions in the prior 30d/90d, split by
+  `admission_status`.
+- Recent hospital-stay context: non-null `hospital_stay_to` in the prior
+  30d/90d.
+
+Implementation guardrail: use only rows with
+`effective_date <= feature_cutoff` and `created_at <= feature_cutoff`. The
+median `created_at - effective_date` lag is 0 days, but 133 rows lag by more
+than 7 days and 104 lag by more than 30 days, so relying only on
+`effective_date` can leak late-entered information.
+
 ---
 
 ## 2. Incidents
@@ -721,6 +768,7 @@ Prediction gap (embargo): 1 day (features use data ≤ t-1d, label starts at t)
 Feature groups (by coverage):
   HIGH  (~82%): vitals rolling features (3d, 7d, 14d lookback), diagnoses flags, history counts
   HIGH  (~83%): care plan needs by category
+  MED   (~62%): hospital_admissions status/context features
   MED   (~39%): lab report abnormal/critical counts
   MED   (~30%): RTH history, transfer outcomes
   MED   (~34%): document_tag semantic flags

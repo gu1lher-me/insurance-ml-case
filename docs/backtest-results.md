@@ -14,30 +14,30 @@ intervention-effectiveness assumptions in `modeling/business_policy.py`.
 Policy: `top_10pct_per_facility`
 
 - Alerts: 401 of 3,612 scored windows (11.1%)
-- Actual claim exposure captured: $298,000 of $1,788,500 (16.7%)
-- Estimated avoided claim dollars: $53,475
+- Actual claim exposure captured: $304,500 of $1,788,500 (17.0%)
+- Estimated avoided claim dollars: $53,900
 - Intervention cost: $40,100
-- Estimated net savings: $13,375
-- Estimated ROI: 0.33x
+- Estimated net savings: $13,800
+- Estimated ROI: 0.34x
 
 ## Sensitivity
 
 | Policy | Alerts | Captured claim cost | Avoided claim cost | Intervention cost | Net savings | ROI |
 |---|---:|---:|---:|---:|---:|---:|
-| `top_05pct_per_facility` | 226 | $172,000 | $31,400 | $22,600 | $8,800 | 0.39x |
-| `top_10pct_per_facility` | 401 | $298,000 | $53,475 | $40,100 | $13,375 | 0.33x |
-| `top_15pct_per_facility` | 590 | $444,500 | $79,775 | $59,000 | $20,775 | 0.35x |
-| `top_20pct_per_facility` | 753 | $581,500 | $103,175 | $75,300 | $27,875 | 0.37x |
-| `economic_threshold` | 431 | $339,500 | $61,775 | $43,100 | $18,675 | 0.43x |
+| `top_05pct_per_facility` | 226 | $192,000 | $34,400 | $22,600 | $11,800 | 0.52x |
+| `top_10pct_per_facility` | 401 | $304,500 | $53,900 | $40,100 | $13,800 | 0.34x |
+| `top_15pct_per_facility` | 590 | $449,500 | $79,775 | $59,000 | $20,775 | 0.35x |
+| `top_20pct_per_facility` | 753 | $584,500 | $103,775 | $75,300 | $28,475 | 0.38x |
+| `economic_threshold` | 423 | $320,000 | $58,875 | $42,300 | $16,575 | 0.39x |
 
 ## Primary Policy By Incident Type
 
 | Incident type | Actual events | Captured events | Captured claim cost | Capture rate |
 |---|---:|---:|---:|---:|
-| Return to hospital | 54 | 6 | $120,000 | 11.1% |
-| Fall | 159 | 41 | $143,500 | 25.8% |
-| Wound / pressure injury | 33 | 8 | $32,000 | 24.2% |
-| Altercation | 6 | 1 | $2,500 | 16.7% |
+| Return to hospital | 54 | 7 | $140,000 | 13.0% |
+| Fall | 159 | 39 | $136,500 | 24.5% |
+| Wound / pressure injury | 33 | 7 | $28,000 | 21.2% |
+| Altercation | 6 | 0 | $0 | 0.0% |
 | Medication error | 1 | 0 | $0 | 0.0% |
 
 ## Interpretation

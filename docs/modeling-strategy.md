@@ -144,20 +144,23 @@ The current model matrices are:
 
 | Matrix | Rows | Features | Targets |
 |---|---:|---:|---|
-| `model_matrix_7d.parquet` | 66,312 | 211 | `fall_7d`, `rth_7d` |
-| `model_matrix_14d.parquet` | 32,361 | 211 | `wound_14d` |
+| `model_matrix_7d.parquet` | 66,312 | 223 | `fall_7d`, `rth_7d` |
+| `model_matrix_14d.parquet` | 32,361 | 223 | `wound_14d` |
 
 The feature groups include demographics, vitals rolling statistics, diagnosis
 flags, prior incident counts, prior RTH counts, care-plan needs, lab counts, and
-document-tag indicators.
+document-tag indicators. They also include leakage-guarded hospital admission
+context: active admission status, recent admission counts, and recent
+`hospital_stay_to` counts where both the source row and event dates are known by
+`feature_cutoff`.
 
 Final holdout performance from the modeling plan:
 
 | Model | Holdout ROC-AUC | Notes |
 |---|---:|---|
-| Fall 7d | 0.8103 | Strongest volume and stable signal |
-| RTH 7d | 0.7342 | Valuable but lower precision due to rarity |
-| Wound 14d | 0.8605 | Best holdout discrimination |
+| Fall 7d | 0.8127 | Strongest volume and stable signal |
+| RTH 7d | 0.7529 | Improved with admission-context features but still rare |
+| Wound 14d | 0.8767 | Best holdout discrimination |
 
 The calibrated probability is then converted to expected claim exposure:
 

@@ -1,6 +1,6 @@
 """Build target-free production scoring features for one as-of date.
 
-The output uses the same 211 feature columns as the 7-day training feature
+The output uses the same feature columns as the 7-day training feature
 store. It creates one row per active resident:
 
     feature_cutoff = as_of_date - 1 day
@@ -64,12 +64,13 @@ def load_raw_tables():
     transfers = pl.read_parquet(RAW / "hospital_transfers.parquet").filter(
         (pl.col("planned_flag") == False) | pl.col("planned_flag").is_null()
     )
+    admissions = pl.read_parquet(RAW / "hospital_admissions.parquet")
     needs = pl.read_parquet(RAW / "needs.parquet").filter(pl.col("strikeout") == False)
     labs = pl.read_parquet(RAW / "lab_reports.parquet")
     doc_tags = pl.read_parquet(RAW / "document_tags.parquet").filter(
         pl.col("deleted_at").is_null()
     )
-    return residents, vitals, incidents, diagnoses, transfers, needs, labs, doc_tags
+    return residents, vitals, incidents, diagnoses, transfers, admissions, needs, labs, doc_tags
 
 
 def build_scoring_spine(residents: pl.DataFrame, as_of_date: datetime) -> pl.DataFrame:
@@ -99,6 +100,7 @@ def assemble_features(
     incidents: pl.DataFrame,
     diagnoses: pl.DataFrame,
     transfers: pl.DataFrame,
+    admissions: pl.DataFrame,
     needs: pl.DataFrame,
     labs: pl.DataFrame,
     doc_tags: pl.DataFrame,
@@ -111,6 +113,7 @@ def assemble_features(
         .join(features_7d.compute_diagnoses(obs, diagnoses), on=join_keys, how="left")
         .join(features_7d.compute_incident_history(obs, incidents), on=join_keys, how="left")
         .join(features_7d.compute_rth_history(obs, transfers), on=join_keys, how="left")
+        .join(features_7d.compute_admission_context(obs, admissions), on=join_keys, how="left")
         .join(features_7d.compute_needs(obs, needs), on=join_keys, how="left")
         .join(features_7d.compute_labs(obs, labs), on=join_keys, how="left")
         .join(features_7d.compute_document_tags(obs, doc_tags), on=join_keys, how="left")
@@ -138,7 +141,7 @@ def align_to_reference(feature_matrix: pl.DataFrame, reference_path: Path) -> pl
 
         if col.endswith("_measured_3d") or col.endswith("_measured_7d") or col.endswith("_measured_14d"):
             default_expr = pl.lit(0).cast(dtype)
-        elif col.startswith(("hist_", "needs_", "labs_", "tag_", "dx_")):
+        elif col.startswith(("hist_", "admission_", "needs_", "labs_", "tag_", "dx_")):
             default_expr = pl.lit(0).cast(dtype)
         else:
             default_expr = pl.lit(None).cast(dtype)
@@ -148,7 +151,17 @@ def align_to_reference(feature_matrix: pl.DataFrame, reference_path: Path) -> pl
 
 
 def build_scoring_features(as_of_date: datetime, reference_path: Path = DEFAULT_REFERENCE) -> pl.DataFrame:
-    residents, vitals, incidents, diagnoses, transfers, needs, labs, doc_tags = load_raw_tables()
+    (
+        residents,
+        vitals,
+        incidents,
+        diagnoses,
+        transfers,
+        admissions,
+        needs,
+        labs,
+        doc_tags,
+    ) = load_raw_tables()
     spine = build_scoring_spine(residents, as_of_date)
     if spine.is_empty():
         raise ValueError(f"No active residents found as of {as_of_date.date()}")
@@ -160,6 +173,7 @@ def build_scoring_features(as_of_date: datetime, reference_path: Path = DEFAULT_
         incidents,
         diagnoses,
         transfers,
+        admissions,
         needs,
         labs,
         doc_tags,

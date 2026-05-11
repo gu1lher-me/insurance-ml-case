@@ -486,8 +486,8 @@ New residents (admitted in the last 7 days) have:
 
 | Matrix | File | Rows | Features | Positive Rate |
 |---|---|---|---|---|
-| 7-day windows | `data/processed/model_matrix_7d.parquet` | 66,312 | 211 | fall_7d: 2.4%, rth_7d: 0.8% |
-| 14-day windows | `data/processed/model_matrix_14d.parquet` | 32,361 | 211 | wound_14d: 1.31% |
+| 7-day windows | `data/processed/model_matrix_7d.parquet` | 66,312 | 223 | fall_7d: 2.4%, rth_7d: 0.8% |
+| 14-day windows | `data/processed/model_matrix_14d.parquet` | 32,361 | 223 | wound_14d: 1.31% |
 
 **Key implementation details:**
 - **Embargo period:** 1 day between last feature data and prediction window start (prevents entry-lag leakage)
@@ -505,34 +505,34 @@ All three models use **14-fold expanding-window CV** (`MIN_TRAIN_WEEKS=26`, `FOL
 
 | Phase | ROC-AUC | Brier Score | PR-AUC |
 |---|---|---|---|
-| CV pooled | 0.7962 | 0.0264 | 0.1391 |
-| CV per-fold | 0.7970 ± 0.0534 | — | — |
-| Holdout — uncalibrated | 0.8093 | 0.0266 | — |
-| Holdout — calibrated | **0.8103** | 0.0272 | — |
+| CV pooled | 0.8196 | 0.0258 | 0.1581 |
+| CV per-fold | 0.8184 ± 0.0556 | — | — |
+| Holdout — uncalibrated | 0.8155 | 0.0264 | — |
+| Holdout — calibrated | **0.8127** | 0.0279 | — |
 
-Calibration marginally improves discrimination on holdout. Per-fold std of ±0.053 indicates moderate temporal variability — expected with ~20–25 positive events per weekly test fold.
+Admission-context features improve pooled CV discrimination. The calibrated model is used for expected-cost scoring even though calibration slightly reduces holdout ROC-AUC; per-fold std of ±0.056 indicates moderate temporal variability, expected with ~20–25 positive events per weekly test fold.
 
 #### H2 — RTH (7-day horizon)
 
 | Phase | ROC-AUC | Brier Score | PR-AUC |
 |---|---|---|---|
-| CV pooled | 0.7556 | 0.0092 | 0.0281 |
-| CV per-fold | 0.7636 ± 0.0918 | — | — |
-| Holdout — uncalibrated | 0.7371 | 0.0079 | — |
-| Holdout — calibrated | **0.7342** | 0.0079 | — |
+| CV pooled | 0.7794 | 0.0091 | 0.0335 |
+| CV per-fold | 0.7898 ± 0.0674 | — | — |
+| Holdout — uncalibrated | 0.7451 | 0.0079 | — |
+| Holdout — calibrated | **0.7529** | 0.0080 | — |
 
-Highest per-fold variance (±0.092) due to small event counts per fold (4–14 positives). Low PR-AUC (0.028) reflects the severe class imbalance (~0.8% positive rate). Despite the Brier Score being very low, this is dominated by the large number of true negatives — the model struggles to produce high-precision alerts for RTH.
+Small event counts per fold (4–14 positives) still make RTH noisy, but admission-context features reduce fold variance and improve holdout ROC-AUC. Low PR-AUC (0.034) reflects the severe class imbalance (~0.8% positive rate). Despite the Brier Score being very low, this is dominated by the large number of true negatives.
 
 #### H3 — Wounds (14-day horizon)
 
 | Phase | ROC-AUC | Brier Score | PR-AUC |
 |---|---|---|---|
-| CV pooled | 0.7805 | 0.0157 | 0.0867 |
-| CV per-fold | 0.7843 ± 0.0735 | — | — |
-| Holdout — uncalibrated | 0.8354 | 0.0115 | — |
-| Holdout — calibrated | **0.8605** | 0.0115 | — |
+| CV pooled | 0.8037 | 0.0154 | 0.1015 |
+| CV per-fold | 0.8043 ± 0.0685 | — | — |
+| Holdout — uncalibrated | 0.8835 | 0.0115 | — |
+| Holdout — calibrated | **0.8767** | 0.0125 | — |
 
-Calibration provides the largest lift among the three models (+0.025 ROC-AUC on holdout). The 14-day horizon provides more signal time, reflected in the lower CV variance relative to RTH despite similar event counts.
+Admission-context features improve wound discrimination as well. Calibration slightly reduces ROC-AUC on holdout but keeps probabilities better suited for expected-cost scoring. The 14-day horizon provides more signal time, reflected in lower CV variance relative to RTH despite similar event counts.
 
 ---
 
