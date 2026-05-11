@@ -183,6 +183,93 @@ Medication-error and elopement risks use rule flags. Their expected-cost
 contribution is based on retrospective positive predictive value of the rule
 sets.
 
+### Altercation Model In Practice
+
+Altercations are modeled differently from falls, RTH, and wounds because the
+weekly event rate is too low for a reliable resident-window classifier. In the
+current data there are 257 altercation events across 127 residents, about a
+4.2% resident-level positive rate, but the 7-day resident-window event rate is
+only about 0.24%. A weekly classifier would mostly learn that almost every
+window is negative and would produce unstable tail probabilities.
+
+The altercation model therefore answers a different question:
+
+```text
+Is this resident behaviorally prone to altercation during their stay?
+```
+
+The target is `has_altercation`, a resident-level binary label equal to 1 when
+the resident has any altercation incident in the training data available before
+the scoring cutoff. The model is a CatBoost classifier trained on resident-level
+features rather than window-level features.
+
+Altercation feature groups:
+
+| Feature group | Examples |
+|---|---|
+| Demographics and stay context | Age, length of stay |
+| Diagnosis flags | Dementia, Alzheimer's, schizophrenia, schizoaffective disorder, bipolar disorder, depression, anxiety, alcohol-related diagnoses |
+| Care-plan needs | Psychotropic, cognitive, behavioral, and mood-related needs |
+| Document tags | Aggressive behavior, dementia, psychotropic medications, hallucinations/delusions, mental status, anxiety, depression, impaired mobility |
+| Non-altercation incident history | Prior falls, wounds, and total prior non-altercation incidents |
+
+Prior altercation counts are intentionally excluded from the feature set to
+avoid a trivial leakage feature. The model can still learn clinically useful
+behavioral and cognitive risk patterns from diagnoses, care needs, notes-derived
+tags, demographics, and other incident history.
+
+The current resident-level model is used as a propensity ranker. Cross-validated
+performance is strong for this purpose:
+
+| Metric | Value |
+|---|---:|
+| CV ROC-AUC | 0.8837 |
+| CV PR-AUC | 0.2995 |
+
+At scoring time, the pipeline does not use the raw resident propensity directly
+as a 7-day event probability. A resident-level "ever altercation" probability
+is much larger than the chance of an altercation in the next week. To make the
+score financially comparable with the other event models, the scorer rescales
+the resident propensity to the observed historical weekly base rate:
+
+```text
+altercation_probability =
+    altercation_resident_probability
+  * historical_weekly_altercation_base_rate
+  / mean_resident_propensity
+```
+
+The value is clipped to `[0, 1]`. The output keeps both numbers:
+
+| Output column | Meaning |
+|---|---|
+| `altercation_resident_probability` | Resident-level propensity score |
+| `altercation_probability` | Weekly probability used in expected-cost scoring |
+| `altercation_weekly_base_rate` | Historical 7-day base rate used for scaling |
+| `altercation_probability_scale` | Multiplicative scale applied to resident propensity |
+
+The weekly probability then contributes to the composite score:
+
+```text
+altercation_expected_cost = altercation_probability * 2500
+altercation_expected_avoidable_cost = altercation_expected_cost * 0.15
+```
+
+In the action queue, altercation is handled as one possible reason for review.
+If it is one of the top expected-cost contributors, the resident receives
+`model:altercation` in `reason_codes`, `altercation` as `top_reason` when it is
+the largest contributor, and this suggested action:
+
+```text
+Behavioral-care review: evaluate triggers, psychotropic monitoring, staffing plan, and resident interactions.
+```
+
+Operationally, this means the altercation model is not meant to say "this
+resident will have an altercation this week" with high certainty. It is meant
+to surface residents whose behavioral profile makes altercation prevention
+worth considering, then price that signal conservatively as a weekly expected
+claim-cost contribution.
+
 The composite score is:
 
 ```text
