@@ -324,25 +324,24 @@ The model also computes expected avoidable cost:
 
 $$
 A_i =
-\sum_{j \in \mathcal{J}}
-\hat{p}_{ij} C_j e_j
+\eta \cdot \mathrm{RiskScore}_i
 $$
 
-where `e_j` is the assumed intervention effectiveness for event type `j`.
+where `eta` is the assumed intervention effectiveness for the POC scenario.
 
-Current pilot assumptions:
+Current baseline assumption:
 
-| Event type | Assumed effectiveness |
+| Parameter | Value |
 |---|---:|
-| Fall | 20% |
-| RTH | 15% |
-| Wound | 20% |
-| Altercation | 15% |
-| Medication error | 20% |
-| Elopement | 25% |
+| Uniform intervention effectiveness | 20% |
 
-These assumptions live in `modeling/business_policy.py` and should be replaced
-by observed effectiveness after a prospective pilot.
+The backtest also reports sensitivity at 10%, 15%, 20%, and 25%. This keeps
+the POC simpler and avoids false precision: the project has evidence that these
+incident types are operationally preventable, but it does not have
+Tricura-specific causal estimates by incident type.
+
+This assumption lives in `modeling/business_policy.py` and should be replaced by
+observed effectiveness after a prospective pilot.
 
 ## 8. Business Decision Policy
 
@@ -428,9 +427,11 @@ Estimated avoided claim dollars are:
 $$
 \mathrm{AvoidedCost} =
 \sum_{e \in \mathcal{E}}
-C_e e_e \cdot
+C_e \eta \cdot
 \mathbb{1}\{\exists i: \mathrm{Captured}(e,i)=1\}
 $$
+
+where `eta` is the uniform effectiveness scenario.
 
 Intervention cost is:
 
@@ -458,25 +459,33 @@ Policy sensitivity:
 
 | Policy | Alerts | Captured claim cost | Avoided claim cost | Intervention cost | Net savings | ROI |
 |---|---:|---:|---:|---:|---:|---:|
-| Top 5% per facility | 226 | USD 172,000 | USD 31,400 | USD 22,600 | USD 8,800 | 0.39x |
-| Top 10% per facility | 401 | USD 298,000 | USD 53,475 | USD 40,100 | USD 13,375 | 0.33x |
-| Top 15% per facility | 590 | USD 444,500 | USD 79,775 | USD 59,000 | USD 20,775 | 0.35x |
-| Top 20% per facility | 753 | USD 581,500 | USD 103,175 | USD 75,300 | USD 27,875 | 0.37x |
-| Economic threshold | 431 | USD 339,500 | USD 61,775 | USD 43,100 | USD 18,675 | 0.43x |
+| Top 5% per facility | 226 | USD 192,000 | USD 38,400 | USD 22,600 | USD 15,800 | 0.70x |
+| Top 10% per facility | 401 | USD 304,500 | USD 60,900 | USD 40,100 | USD 20,800 | 0.52x |
+| Top 15% per facility | 590 | USD 449,500 | USD 89,900 | USD 59,000 | USD 30,900 | 0.52x |
+| Top 20% per facility | 753 | USD 584,500 | USD 116,900 | USD 75,300 | USD 41,600 | 0.55x |
+| Economic threshold | 455 | USD 334,000 | USD 66,800 | USD 45,500 | USD 21,300 | 0.47x |
+
+Primary policy effectiveness sensitivity:
+
+| Assumed effectiveness | Alerts | Captured claim cost | Avoided claim cost | Intervention cost | Net savings | ROI |
+|---:|---:|---:|---:|---:|---:|---:|
+| 10% | 401 | USD 304,500 | USD 30,450 | USD 40,100 | -USD 9,650 | -0.24x |
+| 15% | 401 | USD 304,500 | USD 45,675 | USD 40,100 | USD 5,575 | 0.14x |
+| 20% | 401 | USD 304,500 | USD 60,900 | USD 40,100 | USD 20,800 | 0.52x |
+| 25% | 401 | USD 304,500 | USD 76,125 | USD 40,100 | USD 36,025 | 0.90x |
 
 Primary policy detail (`top_10pct_per_facility`):
 
 | Incident type | Actual events | Captured events | Captured claim cost | Capture rate |
 |---|---:|---:|---:|---:|
-| Return to hospital | 54 | 6 | USD 120,000 | 11.1% |
-| Fall | 159 | 41 | USD 143,500 | 25.8% |
-| Wound / pressure injury | 33 | 8 | USD 32,000 | 24.2% |
-| Altercation | 6 | 1 | USD 2,500 | 16.7% |
+| Return to hospital | 54 | 7 | USD 140,000 | 13.0% |
+| Fall | 159 | 39 | USD 136,500 | 24.5% |
+| Wound / pressure injury | 33 | 7 | USD 28,000 | 21.2% |
+| Altercation | 6 | 0 | USD 0 | 0.0% |
 | Medication error | 1 | 0 | USD 0 | 0.0% |
 
-The economic-threshold policy has the strongest estimated ROI because it alerts
-when expected avoidable dollars exceed the intervention cost, rather than using
-a fixed capacity percentage.
+The strongest observed metric is captured claim exposure. Net savings and ROI
+depend on the uniform effectiveness scenario and alert review cost.
 
 ## 11. Interpretation
 
@@ -491,7 +500,8 @@ The system is designed to make risk operational:
 5. The backtest converts alerts into measurable financial indicators.
 
 The strongest observed metric is captured claim exposure. Estimated savings are
-not causal proof; they depend on assumed intervention effectiveness. A
+not causal proof; they depend on the uniform intervention-effectiveness
+scenario. A
 prospective pilot should randomize or stagger deployment across facilities and
 measure:
 
@@ -519,5 +529,6 @@ risk.
 | `data/scored/composite_scores_holdout.parquet` | Scored holdout resident-windows |
 | `modeling/artifacts/financial_backtest_summary.csv` | Policy-level financial results |
 | `modeling/artifacts/financial_backtest_by_incident_type.csv` | Event-type financial results |
+| `modeling/artifacts/financial_effectiveness_sensitivity.csv` | Uniform-effectiveness sensitivity results |
 | `docs/backtest-results.md` | Generated backtest summary |
 | `docs/prediction-pipeline.md` | New-batch scoring operations guide |

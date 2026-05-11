@@ -2,7 +2,7 @@
 
 This script evaluates how much observed claim exposure the action policy would
 have put in front of facility teams during the holdout period. Savings are
-estimated from explicit intervention-effectiveness assumptions.
+estimated from an explicit uniform intervention-effectiveness scenario.
 """
 
 from __future__ import annotations
@@ -21,10 +21,11 @@ import pandas as pd
 import polars as pl
 
 from modeling.business_policy import (
+    DEFAULT_INTERVENTION_EFFECTIVENESS,
     DEFAULT_ALERT_REVIEW_COST,
     DEFAULT_CAPACITY_RATES,
     EVENT_LABELS,
-    INTERVENTION_EFFECTIVENESS,
+    INTERVENTION_EFFECTIVENESS_SENSITIVITY,
     PolicyAssumptions,
 )
 from modeling.outcome_costs import build_actual_event_table
@@ -36,6 +37,7 @@ DOCS_DIR = ROOT / "docs"
 SUMMARY_PATH = ARTIFACTS_DIR / "financial_backtest_summary.csv"
 BY_TYPE_PATH = ARTIFACTS_DIR / "financial_backtest_by_incident_type.csv"
 CAPTURED_EVENTS_PATH = ARTIFACTS_DIR / "financial_backtest_captured_events.csv"
+EFFECTIVENESS_SENSITIVITY_PATH = ARTIFACTS_DIR / "financial_effectiveness_sensitivity.csv"
 REPORT_PATH = DOCS_DIR / "backtest-results.md"
 
 
@@ -57,10 +59,25 @@ def parse_args() -> argparse.Namespace:
         default=DEFAULT_ALERT_REVIEW_COST,
         help="Assumed operational cost per alert/intervention review.",
     )
+    parser.add_argument(
+        "--intervention-effectiveness",
+        type=float,
+        default=DEFAULT_INTERVENTION_EFFECTIVENESS,
+        help="Uniform baseline intervention effectiveness applied to all incident types.",
+    )
+    parser.add_argument(
+        "--effectiveness-sensitivity",
+        type=float,
+        nargs="+",
+        default=list(INTERVENTION_EFFECTIVENESS_SENSITIVITY),
+        help="Uniform effectiveness rates to evaluate in sensitivity analysis.",
+    )
     return parser.parse_args()
 
 
 def _fmt_money(value: float) -> str:
+    if value < 0:
+        return f"-${abs(value):,.0f}"
     return f"${value:,.0f}"
 
 
@@ -99,7 +116,10 @@ def policy_masks(scores: pd.DataFrame, assumptions: PolicyAssumptions) -> dict[s
     for rate in assumptions.capacity_rates:
         label = f"top_{int(rate * 100):02d}pct_per_facility"
         masks[label] = select_top_by_facility(scores, rate)
-    masks["economic_threshold"] = scores["expected_avoidable_cost"] >= assumptions.alert_review_cost
+    masks["economic_threshold"] = (
+        scores["composite_expected_cost"] * assumptions.intervention_effectiveness
+        >= assumptions.alert_review_cost
+    )
     return masks
 
 
@@ -148,14 +168,16 @@ def summarize_policy(
     alerts = scores[selected].copy()
     captured = captured_events(alerts, events)
 
-    captured["estimated_avoided_claim_cost"] = captured.apply(
-        lambda row: row["claim_cost"] * INTERVENTION_EFFECTIVENESS[row["event_type"]],
-        axis=1,
-    ) if not captured.empty else []
-    captured["estimated_prevented_events"] = captured.apply(
-        lambda row: INTERVENTION_EFFECTIVENESS[row["event_type"]],
-        axis=1,
-    ) if not captured.empty else []
+    if not captured.empty:
+        captured["intervention_effectiveness"] = assumptions.intervention_effectiveness
+        captured["estimated_avoided_claim_cost"] = (
+            captured["claim_cost"] * assumptions.intervention_effectiveness
+        )
+        captured["estimated_prevented_events"] = assumptions.intervention_effectiveness
+    else:
+        captured["intervention_effectiveness"] = []
+        captured["estimated_avoided_claim_cost"] = []
+        captured["estimated_prevented_events"] = []
 
     intervention_cost = len(alerts) * assumptions.alert_review_cost
     captured_claim_cost = float(captured["claim_cost"].sum()) if not captured.empty else 0.0
@@ -181,7 +203,9 @@ def summarize_policy(
         "threshold_min_composite_expected_cost": min_threshold,
         "threshold_median_composite_expected_cost": median_threshold,
         "expected_claim_cost_alerted": float(alerts["composite_expected_cost"].sum()),
-        "expected_avoidable_cost_alerted": float(alerts["expected_avoidable_cost"].sum()),
+        "expected_avoidable_cost_alerted": float(
+            alerts["composite_expected_cost"].sum() * assumptions.intervention_effectiveness
+        ),
         "actual_events": len(events),
         "actual_claim_cost": total_claim_cost,
         "captured_events": len(captured),
@@ -196,6 +220,7 @@ def summarize_policy(
         "intervention_cost": intervention_cost,
         "estimated_net_savings": net_savings,
         "estimated_roi": net_savings / intervention_cost if intervention_cost else 0.0,
+        "intervention_effectiveness": assumptions.intervention_effectiveness,
     }
     captured["policy"] = policy_name
     return summary, captured
@@ -263,7 +288,13 @@ def summarize_by_type(events: pd.DataFrame, captured_all: pd.DataFrame) -> pd.Da
     ]
 
 
-def write_report(summary: pd.DataFrame, by_type: pd.DataFrame, scores: pd.DataFrame) -> None:
+def write_report(
+    summary: pd.DataFrame,
+    by_type: pd.DataFrame,
+    scores: pd.DataFrame,
+    assumptions: PolicyAssumptions,
+    effectiveness_sensitivity: pd.DataFrame,
+) -> None:
     primary_policy = "top_10pct_per_facility"
     primary = summary[summary["policy"] == primary_policy]
     if primary.empty:
@@ -282,8 +313,11 @@ def write_report(summary: pd.DataFrame, by_type: pd.DataFrame, scores: pd.DataFr
         f"Scoring period: {scores['window_start'].min().date()} to {scores['window_end'].max().date()}",
         "",
         "The backtest estimates financial value by asking which observed holdout events",
-        "would have been preceded by an alert. Estimated savings apply the pilot",
-        "intervention-effectiveness assumptions in `modeling/business_policy.py`.",
+        "would have been preceded by an alert. Estimated savings apply one uniform",
+        "scenario assumption for intervention effectiveness, defined in",
+        "`modeling/business_policy.py`.",
+        "",
+        f"Baseline intervention effectiveness: {_fmt_pct(assumptions.intervention_effectiveness)}",
         "",
         "## Primary Policy",
         "",
@@ -298,6 +332,8 @@ def write_report(summary: pd.DataFrame, by_type: pd.DataFrame, scores: pd.DataFr
         "",
         "## Sensitivity",
         "",
+        "### Policy Sensitivity",
+        "",
         "| Policy | Alerts | Captured claim cost | Avoided claim cost | Intervention cost | Net savings | ROI |",
         "|---|---:|---:|---:|---:|---:|---:|",
     ]
@@ -305,6 +341,29 @@ def write_report(summary: pd.DataFrame, by_type: pd.DataFrame, scores: pd.DataFr
     for _, s in summary.iterrows():
         lines.append(
             f"| `{s['policy']}` | {int(s['alerts']):,} | "
+            f"{_fmt_money(s['captured_claim_cost'])} | "
+            f"{_fmt_money(s['estimated_avoided_claim_cost'])} | "
+            f"{_fmt_money(s['intervention_cost'])} | "
+            f"{_fmt_money(s['estimated_net_savings'])} | "
+            f"{s['estimated_roi']:.2f}x |"
+        )
+
+    primary_effectiveness = effectiveness_sensitivity[
+        effectiveness_sensitivity["policy"] == row["policy"]
+    ].copy()
+    lines.extend(
+        [
+            "",
+            "### Primary Policy Effectiveness Sensitivity",
+            "",
+            "| Assumed effectiveness | Alerts | Captured claim cost | Avoided claim cost | Intervention cost | Net savings | ROI |",
+            "|---:|---:|---:|---:|---:|---:|---:|",
+        ]
+    )
+    for _, s in primary_effectiveness.sort_values("intervention_effectiveness").iterrows():
+        lines.append(
+            f"| {_fmt_pct(s['intervention_effectiveness'])} | "
+            f"{int(s['alerts']):,} | "
             f"{_fmt_money(s['captured_claim_cost'])} | "
             f"{_fmt_money(s['estimated_avoided_claim_cost'])} | "
             f"{_fmt_money(s['intervention_cost'])} | "
@@ -335,8 +394,9 @@ def write_report(summary: pd.DataFrame, by_type: pd.DataFrame, scores: pd.DataFr
             "",
             "These are backtested financial indicators, not causal proof. The strongest",
             "observed metric is captured claim exposure: dollars from events that had an",
-            "alert before they occurred. Net savings depends on the intervention cost and",
-            "effectiveness assumptions and should be validated in a prospective pilot.",
+            "alert before they occurred. Net savings depends on intervention cost and",
+            "the uniform effectiveness scenario, which should be replaced with measured",
+            "effects from a prospective pilot.",
             "",
         ]
     )
@@ -345,13 +405,22 @@ def write_report(summary: pd.DataFrame, by_type: pd.DataFrame, scores: pd.DataFr
     REPORT_PATH.write_text("\n".join(lines), encoding="utf-8")
 
 
-def run_backtest(scores: pd.DataFrame, assumptions: PolicyAssumptions) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+def load_events_for_scores(scores: pd.DataFrame) -> pd.DataFrame:
     event_start = scores["window_start"].min()
     event_end = scores["window_end"].max()
     events = build_actual_event_table(start=event_start, end=event_end).to_pandas()
     if not events.empty:
         events["event_time"] = pd.to_datetime(events["event_time"])
+    return events
 
+
+def run_backtest(
+    scores: pd.DataFrame,
+    assumptions: PolicyAssumptions,
+    events: pd.DataFrame | None = None,
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    if events is None:
+        events = load_events_for_scores(scores)
     summaries = []
     captured_frames = []
     for policy_name, selected in policy_masks(scores, assumptions).items():
@@ -372,23 +441,58 @@ def run_backtest(scores: pd.DataFrame, assumptions: PolicyAssumptions) -> tuple[
     return summary_df, by_type, captured_all
 
 
+def run_effectiveness_sensitivity(
+    scores: pd.DataFrame,
+    alert_review_cost: float,
+    rates: tuple[float, ...],
+    events: pd.DataFrame,
+) -> pd.DataFrame:
+    frames = []
+    for rate in rates:
+        assumptions = PolicyAssumptions(
+            alert_review_cost=alert_review_cost,
+            intervention_effectiveness=rate,
+            effectiveness_sensitivity=rates,
+        )
+        summary, _, _ = run_backtest(scores, assumptions, events)
+        frames.append(summary)
+    return pd.concat(frames, ignore_index=True)
+
+
 def main() -> None:
     args = parse_args()
-    assumptions = PolicyAssumptions(alert_review_cost=args.alert_cost)
+    sensitivity_rates = tuple(args.effectiveness_sensitivity)
+    if args.intervention_effectiveness not in sensitivity_rates:
+        sensitivity_rates = tuple(sorted((*sensitivity_rates, args.intervention_effectiveness)))
+
+    assumptions = PolicyAssumptions(
+        alert_review_cost=args.alert_cost,
+        intervention_effectiveness=args.intervention_effectiveness,
+        effectiveness_sensitivity=sensitivity_rates,
+    )
     ARTIFACTS_DIR.mkdir(parents=True, exist_ok=True)
 
     scores = load_scores(Path(args.scores_path), args.score_if_missing)
-    summary, by_type, captured = run_backtest(scores, assumptions)
+    events = load_events_for_scores(scores)
+    summary, by_type, captured = run_backtest(scores, assumptions, events)
+    effectiveness_sensitivity = run_effectiveness_sensitivity(
+        scores,
+        assumptions.alert_review_cost,
+        assumptions.effectiveness_sensitivity,
+        events,
+    )
 
     summary.to_csv(SUMMARY_PATH, index=False)
     by_type.to_csv(BY_TYPE_PATH, index=False)
     captured.to_csv(CAPTURED_EVENTS_PATH, index=False)
-    write_report(summary, by_type, scores)
+    effectiveness_sensitivity.to_csv(EFFECTIVENESS_SENSITIVITY_PATH, index=False)
+    write_report(summary, by_type, scores, assumptions, effectiveness_sensitivity)
 
     primary = summary[summary["policy"] == "top_10pct_per_facility"].iloc[0]
     print("\nFinancial backtest complete.")
     print(f"  Summary: {SUMMARY_PATH}")
     print(f"  By type: {BY_TYPE_PATH}")
+    print(f"  Effectiveness sensitivity: {EFFECTIVENESS_SENSITIVITY_PATH}")
     print(f"  Report: {REPORT_PATH}")
     print(
         "  Primary policy net savings: "

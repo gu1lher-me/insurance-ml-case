@@ -252,7 +252,7 @@ The weekly probability then contributes to the composite score:
 
 ```text
 altercation_expected_cost = altercation_probability * 2500
-altercation_expected_avoidable_cost = altercation_expected_cost * 0.15
+altercation_expected_avoidable_cost = altercation_expected_cost * 0.20
 ```
 
 In the action queue, altercation is handled as one possible reason for review.
@@ -282,17 +282,17 @@ composite_expected_cost =
   + elopement_probability * 2500
 ```
 
-Expected avoidable cost then applies pilot intervention-effectiveness
-assumptions from `modeling/business_policy.py`:
+Expected avoidable cost applies one uniform intervention-effectiveness
+scenario from `modeling/business_policy.py`:
 
-| Incident type | Assumed effectiveness |
-|---|---:|
-| Falls | 20% |
-| RTH | 15% |
-| Wounds | 20% |
-| Altercations | 15% |
-| Medication errors | 20% |
-| Elopement | 25% |
+```text
+expected_avoidable_cost = composite_expected_cost * 0.20
+```
+
+This 20% baseline is not a learned causal estimate. It is a simple POC
+assumption chosen to avoid false precision across incident types. The backtest
+also reports sensitivity at 10%, 15%, 20%, and 25%; incident-specific
+effectiveness should only be added after a prospective pilot measures it.
 
 The default economic action rule is:
 
@@ -325,25 +325,34 @@ Primary policy result, `top_10pct_per_facility`:
 | Alert rate | 11.1% |
 | Captured claim exposure | USD 304,500 |
 | Claim exposure capture rate | 17.0% |
-| Estimated avoided claim dollars | USD 53,900 |
+| Estimated avoided claim dollars | USD 60,900 |
 | Intervention cost | USD 40,100 |
-| Estimated net savings | USD 13,800 |
-| Estimated ROI | 0.34x |
+| Estimated net savings | USD 20,800 |
+| Estimated ROI | 0.52x |
 
 Policy sensitivity:
 
 | Policy | Alerts | Captured claim cost | Avoided claim cost | Intervention cost | Net savings | ROI |
 |---|---:|---:|---:|---:|---:|---:|
-| Top 5% per facility | 226 | USD 192,000 | USD 34,400 | USD 22,600 | USD 11,800 | 0.52x |
-| Top 10% per facility | 401 | USD 304,500 | USD 53,900 | USD 40,100 | USD 13,800 | 0.34x |
-| Top 15% per facility | 590 | USD 449,500 | USD 79,775 | USD 59,000 | USD 20,775 | 0.35x |
-| Top 20% per facility | 753 | USD 584,500 | USD 103,775 | USD 75,300 | USD 28,475 | 0.38x |
-| Economic threshold | 423 | USD 320,000 | USD 58,875 | USD 42,300 | USD 16,575 | 0.39x |
+| Top 5% per facility | 226 | USD 192,000 | USD 38,400 | USD 22,600 | USD 15,800 | 0.70x |
+| Top 10% per facility | 401 | USD 304,500 | USD 60,900 | USD 40,100 | USD 20,800 | 0.52x |
+| Top 15% per facility | 590 | USD 449,500 | USD 89,900 | USD 59,000 | USD 30,900 | 0.52x |
+| Top 20% per facility | 753 | USD 584,500 | USD 116,900 | USD 75,300 | USD 41,600 | 0.55x |
+| Economic threshold | 455 | USD 334,000 | USD 66,800 | USD 45,500 | USD 21,300 | 0.47x |
+
+Primary policy effectiveness sensitivity:
+
+| Assumed effectiveness | Alerts | Captured claim cost | Avoided claim cost | Intervention cost | Net savings | ROI |
+|---:|---:|---:|---:|---:|---:|---:|
+| 10% | 401 | USD 304,500 | USD 30,450 | USD 40,100 | -USD 9,650 | -0.24x |
+| 15% | 401 | USD 304,500 | USD 45,675 | USD 40,100 | USD 5,575 | 0.14x |
+| 20% | 401 | USD 304,500 | USD 60,900 | USD 40,100 | USD 20,800 | 0.52x |
+| 25% | 401 | USD 304,500 | USD 76,125 | USD 40,100 | USD 36,025 | 0.90x |
 
 The most important metric is captured claim exposure: dollars from actual
 holdout events that had an alert before the event occurred. Net savings and ROI
-are decision metrics, but they depend on the assumed intervention effectiveness
-and review cost. They should be validated in a prospective pilot.
+are decision metrics, but they depend on the uniform effectiveness scenario and
+review cost. They should be validated in a prospective pilot.
 
 For the generated report, see
 [`docs/backtest-results.md`](docs/backtest-results.md).
@@ -405,7 +414,9 @@ Run the financial backtest:
 ```powershell
 uv run python modeling\backtest_financials.py `
   --scores-path data\scored\composite_scores_holdout.parquet `
-  --alert-cost 100
+  --alert-cost 100 `
+  --intervention-effectiveness 0.20 `
+  --effectiveness-sensitivity 0.10 0.15 0.20 0.25
 ```
 
 ## Daily Scoring
@@ -476,7 +487,7 @@ Daily scoring parameters:
 This backtest shows that the system can put meaningful claim dollars in front
 of facility teams before incidents occur. The January 2025 primary policy
 captured USD 304,500 of claim exposure with 401 alerts, producing an estimated
-USD 13,800 in net savings under the pilot assumptions.
+USD 20,800 in net savings under the 20% baseline effectiveness scenario.
 
 Those savings are not causal proof. The recommended next step is a prospective
 pilot that measures actual claims versus expected claims after deployment,

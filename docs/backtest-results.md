@@ -6,8 +6,11 @@ For the full technical modeling strategy behind these results, see
 Scoring period: 2025-01-01 to 2025-02-01
 
 The backtest estimates financial value by asking which observed holdout events
-would have been preceded by an alert. Estimated savings apply the pilot
-intervention-effectiveness assumptions in `modeling/business_policy.py`.
+would have been preceded by an alert. Estimated savings apply one uniform
+scenario assumption for intervention effectiveness, defined in
+`modeling/business_policy.py`.
+
+Baseline intervention effectiveness: 20.0%
 
 ## Primary Policy
 
@@ -15,20 +18,31 @@ Policy: `top_10pct_per_facility`
 
 - Alerts: 401 of 3,612 scored windows (11.1%)
 - Actual claim exposure captured: $304,500 of $1,788,500 (17.0%)
-- Estimated avoided claim dollars: $53,900
+- Estimated avoided claim dollars: $60,900
 - Intervention cost: $40,100
-- Estimated net savings: $13,800
-- Estimated ROI: 0.34x
+- Estimated net savings: $20,800
+- Estimated ROI: 0.52x
 
 ## Sensitivity
 
+### Policy Sensitivity
+
 | Policy | Alerts | Captured claim cost | Avoided claim cost | Intervention cost | Net savings | ROI |
 |---|---:|---:|---:|---:|---:|---:|
-| `top_05pct_per_facility` | 226 | $192,000 | $34,400 | $22,600 | $11,800 | 0.52x |
-| `top_10pct_per_facility` | 401 | $304,500 | $53,900 | $40,100 | $13,800 | 0.34x |
-| `top_15pct_per_facility` | 590 | $449,500 | $79,775 | $59,000 | $20,775 | 0.35x |
-| `top_20pct_per_facility` | 753 | $584,500 | $103,775 | $75,300 | $28,475 | 0.38x |
-| `economic_threshold` | 423 | $320,000 | $58,875 | $42,300 | $16,575 | 0.39x |
+| `top_05pct_per_facility` | 226 | $192,000 | $38,400 | $22,600 | $15,800 | 0.70x |
+| `top_10pct_per_facility` | 401 | $304,500 | $60,900 | $40,100 | $20,800 | 0.52x |
+| `top_15pct_per_facility` | 590 | $449,500 | $89,900 | $59,000 | $30,900 | 0.52x |
+| `top_20pct_per_facility` | 753 | $584,500 | $116,900 | $75,300 | $41,600 | 0.55x |
+| `economic_threshold` | 455 | $334,000 | $66,800 | $45,500 | $21,300 | 0.47x |
+
+### Primary Policy Effectiveness Sensitivity
+
+| Assumed effectiveness | Alerts | Captured claim cost | Avoided claim cost | Intervention cost | Net savings | ROI |
+|---:|---:|---:|---:|---:|---:|---:|
+| 10.0% | 401 | $304,500 | $30,450 | $40,100 | -$9,650 | -0.24x |
+| 15.0% | 401 | $304,500 | $45,675 | $40,100 | $5,575 | 0.14x |
+| 20.0% | 401 | $304,500 | $60,900 | $40,100 | $20,800 | 0.52x |
+| 25.0% | 401 | $304,500 | $76,125 | $40,100 | $36,025 | 0.90x |
 
 ## Primary Policy By Incident Type
 
@@ -44,5 +58,6 @@ Policy: `top_10pct_per_facility`
 
 These are backtested financial indicators, not causal proof. The strongest
 observed metric is captured claim exposure: dollars from events that had an
-alert before they occurred. Net savings depends on the intervention cost and
-effectiveness assumptions and should be validated in a prospective pilot.
+alert before they occurred. Net savings depends on intervention cost and
+the uniform effectiveness scenario, which should be replaced with measured
+effects from a prospective pilot.

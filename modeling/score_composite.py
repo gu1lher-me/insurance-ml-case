@@ -29,7 +29,7 @@ from modeling.business_policy import (
     ALTERCATION_7D_BASE_RATE_FALLBACK,
     AVG_CLAIM_COST,
     DEFAULT_ALERT_REVIEW_COST,
-    INTERVENTION_EFFECTIVENESS,
+    DEFAULT_INTERVENTION_EFFECTIVENESS,
     load_rule_precisions,
 )
 from modeling.business_rules import score_rules_for_spine
@@ -383,7 +383,7 @@ def add_composite_costs(scored: pl.DataFrame) -> pl.DataFrame:
         avoidable_exprs.append(
             (
                 pl.col(f"{event_type}_expected_cost")
-                * INTERVENTION_EFFECTIVENESS[event_type]
+                * DEFAULT_INTERVENTION_EFFECTIVENESS
             ).alias(f"{event_type}_expected_avoidable_cost")
         )
 

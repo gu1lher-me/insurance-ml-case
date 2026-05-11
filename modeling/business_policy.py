@@ -30,15 +30,16 @@ PREDICTION_HORIZON_DAYS = {
     "elopement": 30,
 }
 
-# These are pilot assumptions, not learned quantities. They should be replaced
-# with measured values from an intervention study once available.
+SUPPORTED_EVENT_TYPES = tuple(AVG_CLAIM_COST.keys())
+
+# This is a scenario assumption, not a learned causal estimate. Keep one
+# baseline value for the POC to avoid false precision; replace it with
+# incident-specific measured effects after a prospective pilot.
+DEFAULT_INTERVENTION_EFFECTIVENESS = 0.20
+INTERVENTION_EFFECTIVENESS_SENSITIVITY = (0.10, 0.15, 0.20, 0.25)
 INTERVENTION_EFFECTIVENESS = {
-    "fall": 0.20,
-    "rth": 0.15,
-    "wound": 0.20,
-    "altercation": 0.15,
-    "med_error": 0.20,
-    "elopement": 0.25,
+    event_type: DEFAULT_INTERVENTION_EFFECTIVENESS
+    for event_type in SUPPORTED_EVENT_TYPES
 }
 
 DEFAULT_ALERT_REVIEW_COST = 100.0
@@ -84,6 +85,8 @@ class PolicyAssumptions:
     alert_review_cost: float = DEFAULT_ALERT_REVIEW_COST
     capacity_rates: tuple[float, ...] = DEFAULT_CAPACITY_RATES
     primary_capacity_rate: float = PRIMARY_CAPACITY_RATE
+    intervention_effectiveness: float = DEFAULT_INTERVENTION_EFFECTIVENESS
+    effectiveness_sensitivity: tuple[float, ...] = INTERVENTION_EFFECTIVENESS_SENSITIVITY
 
 
 def expected_cost_col(event_type: str) -> str:
