@@ -357,6 +357,31 @@ review cost. They should be validated in a prospective pilot.
 For the generated report, see
 [`docs/backtest-results.md`](docs/backtest-results.md).
 
+## Next Steps for Production
+
+The current system is validated in backtest. To move to production, consider:
+
+### A/B Testing & Causal Validation
+- Deploy model predictions to a subset of facilities while maintaining control groups
+- Compare alerts + interventions vs. baseline over 2–3 months
+- Measure actual incidents, claims, and facility engagement rates
+- Use difference-in-differences or causal forest to account for facility baseline risk and resident mix
+- Decision: roll out to full portfolio or refine model based on pilot results
+
+### Cloud Deployment
+- Containerize the training and scoring pipelines (Docker)
+- Deploy to AWS (S3 for data/artifacts, EC2/SageMaker/K8s pods for compute)
+- Move MLflow tracking server to remote instance and store artifacts on S3
+
+### Orchestration & Workflow
+- Build Airflow DAGs for:
+  - **Daily feature engineering**: compute 7d and 14d features for active residents
+  - **Drift monitoring**: detect feature/label/prediction drift and alert on performance degradation
+  - **Model retraining**: retrain Tier 1 and altercation models using expanding-window logic
+  - **Batch scoring**: score all residents and generate action queues  
+- Integrate with MLflow model registry for governance (staging → production promotion)
+- Add data validation and error-handling; configure alerting and logging
+
 ## Reproducing the Pipeline
 
 Build historical 7-day features and labels:
