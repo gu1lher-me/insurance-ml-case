@@ -7,7 +7,8 @@ Each CV fold tests on a single observation window (matching the
 prediction horizon) while training on all prior data.
 
 Final model is trained on all pre-holdout data, evaluated on holdout
-(Jan 2025), and compared with an isotonic-calibrated variant.
+(Jan 2025), and compared with a temporal out-of-fold isotonic-calibrated
+variant.
 
 Targets:
   - fall_7d, rth_7d  → model_matrix_7d.parquet  (7-day horizon)
@@ -38,11 +39,13 @@ import polars as pl
 import optuna
 from catboost import CatBoostClassifier
 from scipy.stats import ks_2samp
-from sklearn.calibration import CalibratedClassifierCV, calibration_curve
+from sklearn.calibration import calibration_curve
+from sklearn.isotonic import IsotonicRegression
 from sklearn.metrics import (auc,  # f1_score,; precision_score,; recall_score,
                              brier_score_loss, log_loss,
                              precision_recall_curve, roc_auc_score, roc_curve)
 
+from modeling.calibration import TemporalCalibratedClassifier
 from modeling.hyperparameter_tuning import (
     load_hyperparameters,
     save_hyperparameters,
@@ -140,25 +143,32 @@ def load_data(target):
     return df, feature_cols
 
 
-def get_fold_boundaries(df, horizon_days):
+def _as_date(value):
+    return value.date() if hasattr(value, "date") else value
+
+
+def get_fold_boundaries(df, horizon_days, end_date=HOLDOUT_START):
     """Generate a regular grid of fold boundaries.
 
     Each boundary defines a test window [boundary, boundary + horizon).
     Training uses all rows with window_end <= boundary (purging).
     Boundaries are spaced FOLD_STEP weeks apart.
     """
-    ws_col = df.filter(pl.col("window_start") < HOLDOUT_START)["window_start"]
+    end_date = _as_date(end_date)
+    ws_col = df.filter(pl.col("window_start") < end_date)["window_start"]
+    if len(ws_col) == 0:
+        return []
+
     data_start = ws_col.min()
 
     # Normalise to a plain date so arithmetic is clean
-    if hasattr(data_start, "date"):
-        data_start = data_start.date()
+    data_start = _as_date(data_start)
 
     first_boundary = data_start + timedelta(weeks=MIN_TRAIN_WEEKS)
 
     boundaries = []
     current = first_boundary
-    while current < HOLDOUT_START:
+    while current < end_date:
         boundaries.append(current)
         current += timedelta(weeks=FOLD_STEP)
 
@@ -447,6 +457,120 @@ def run_expanding_cv(df, target, feature_cols, horizon_days, model_params=None):
     return fold_df, pooled_metrics
 
 
+def collect_temporal_calibration_predictions(
+    df,
+    target,
+    feature_cols,
+    horizon_days,
+    model_params=None,
+    end_date=HOLDOUT_START,
+):
+    """Create leakage-safe calibration data from purged expanding-window folds."""
+    boundaries = get_fold_boundaries(df, horizon_days, end_date=end_date)
+
+    fold_records = []
+    all_y_true = []
+    all_y_prob = []
+
+    for fold_idx, boundary in enumerate(boundaries):
+        test_end = boundary + timedelta(days=horizon_days)
+        train_df = df.filter(pl.col("window_end") <= boundary)
+        calibration_df = df.filter(
+            (pl.col("window_start") >= boundary)
+            & (pl.col("window_start") < test_end)
+        )
+
+        if calibration_df.is_empty():
+            continue
+
+        X_train = train_df.select(feature_cols)
+        y_train = train_df[target].to_numpy().ravel()
+        if len(np.unique(y_train)) < 2:
+            continue
+
+        X_calibration = calibration_df.select(feature_cols)
+        y_calibration = calibration_df[target].to_numpy().ravel()
+
+        model = make_catboost(model_params)
+        model.fit(X_train, y_train)
+        y_prob = model.predict_proba(X_calibration)[:, 1]
+
+        fold_records.append(
+            {
+                "fold": fold_idx,
+                "boundary": str(boundary),
+                "train_size": len(y_train),
+                "calibration_size": len(y_calibration),
+                "calibration_positives": int(y_calibration.sum()),
+            }
+        )
+        all_y_true.extend(y_calibration.tolist())
+        all_y_prob.extend(y_prob.tolist())
+
+        print(
+            f"    Calibration fold {fold_idx + 1}/{len(boundaries)}: "
+            f"train={len(y_train):,}  calibration={len(y_calibration):,}  "
+            f"pos={int(y_calibration.sum())}"
+        )
+
+    if not all_y_true:
+        raise ValueError(f"No temporal calibration rows were generated for {target}.")
+
+    y_true = np.array(all_y_true)
+    y_prob = np.array(all_y_prob)
+    if len(np.unique(y_true)) < 2:
+        raise ValueError(
+            f"Temporal calibration rows for {target} contain only one class."
+        )
+
+    return y_true, y_prob, pl.DataFrame(fold_records)
+
+
+def fit_isotonic_calibrator(y_prob, y_true):
+    calibrator = IsotonicRegression(
+        y_min=0.0,
+        y_max=1.0,
+        out_of_bounds="clip",
+    )
+    calibrator.fit(y_prob, y_true)
+    return calibrator
+
+
+def train_temporal_isotonic_model(
+    df,
+    target,
+    feature_cols,
+    horizon_days,
+    model_params=None,
+    end_date=HOLDOUT_START,
+):
+    """Fit a final CatBoost model and calibrate it with temporal OOF predictions."""
+    y_calibration, y_prob_calibration, calibration_folds = (
+        collect_temporal_calibration_predictions(
+            df,
+            target,
+            feature_cols,
+            horizon_days,
+            model_params=model_params,
+            end_date=end_date,
+        )
+    )
+    calibrator = fit_isotonic_calibrator(y_prob_calibration, y_calibration)
+
+    X = df.select(feature_cols)
+    base_model = make_catboost(model_params)
+    base_model.fit(X, df[target].to_numpy().ravel())
+
+    return {
+        "model": TemporalCalibratedClassifier(base_model, calibrator),
+        "base_model": base_model,
+        "calibrator": calibrator,
+        "y_calibration": y_calibration,
+        "y_prob_calibration": y_prob_calibration,
+        "calibration_folds": calibration_folds,
+    }
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 #  Phase 2 — Final Model + Holdout Evaluation
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -460,30 +584,33 @@ def train_final_model(df, target, feature_cols, model_params=None):
     train_df = df.filter(pl.col("window_end") <= HOLDOUT_START)
     holdout_df = df.filter(pl.col("window_start") >= HOLDOUT_START)
 
-    X_train = train_df.select(feature_cols)
     y_train = train_df[target].to_numpy().ravel()
     X_holdout = holdout_df.select(feature_cols)
     y_holdout = holdout_df[target].to_numpy().ravel()
 
-    # Uncalibrated
-    print("  Training final CatBoost (uncalibrated)...")
-    model = make_catboost(model_params)
-    model.fit(X_train, y_train)
+    print("  Training final CatBoost + temporal isotonic calibrator...")
+    calibrated = train_temporal_isotonic_model(
+        train_df,
+        target,
+        feature_cols,
+        TARGET_CONFIG[target]["horizon_days"],
+        model_params=model_params,
+        end_date=HOLDOUT_START,
+    )
+
+    model = calibrated["base_model"]
+    cal_model = calibrated["model"]
     y_prob_uncal = model.predict_proba(X_holdout)[:, 1]
     metrics_uncal = compute_metrics(y_holdout, y_prob_uncal)
-
-    # Calibrated (isotonic, CV=5)
-    print("  Training final CatBoost (calibrated, isotonic CV=5)...")
-    cal_model = CalibratedClassifierCV(
-        estimator=make_catboost(model_params), cv=5, method="sigmoid"
-    )
-    cal_model.fit(X_train, y_train)
     y_prob_cal = cal_model.predict_proba(X_holdout)[:, 1]
     metrics_cal = compute_metrics(y_holdout, y_prob_cal)
 
     return {
         "model": model,
         "cal_model": cal_model,
+        "calibration_folds": calibrated["calibration_folds"],
+        "calibration_size": len(calibrated["y_calibration"]),
+        "calibration_pos_rate": float(calibrated["y_calibration"].mean()),
         "y_holdout": y_holdout,
         "y_prob_uncal": y_prob_uncal,
         "y_prob_cal": y_prob_cal,
@@ -640,8 +767,11 @@ def log_final_calibrated(target, res, feature_cols, target_display, model_params
                 "target": target,
                 "algorithm": "catboost",
                 "calibrated": True,
-                "calibration_method": "sigmoid",
-                "calibration_cv": 5,
+                "calibration_method": "isotonic",
+                "calibration_strategy": "temporal_oof_expanding_window",
+                "calibration_folds": res["calibration_folds"].height,
+                "calibration_size": res["calibration_size"],
+                "calibration_positive_rate": round(res["calibration_pos_rate"], 5),
                 "n_features": len(feature_cols),
                 "train_size": res["train_size"],
                 "holdout_size": res["holdout_size"],
@@ -676,6 +806,12 @@ def log_final_calibrated(target, res, feature_cols, target_display, model_params
 
         # Model artifact
         mlflow.sklearn.log_model(res["cal_model"], "model")
+
+        calibration_fold_path = (
+            ARTIFACTS_DIR / f"{target}_temporal_calibration_fold_metrics.csv"
+        )
+        res["calibration_folds"].write_csv(calibration_fold_path)
+        mlflow.log_artifact(str(calibration_fold_path))
 
 
 def log_calibration_comparison(target, res, target_display):

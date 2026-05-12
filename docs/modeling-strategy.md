@@ -154,6 +154,13 @@ context: active admission status, recent admission counts, and recent
 `hospital_stay_to` counts where both the source row and event dates are known by
 `feature_cutoff`.
 
+Probability calibration uses the same chronological discipline as validation.
+For each purged expanding-window fold, a fold model is trained only on rows with
+`window_end <= boundary` and then scores the next horizon window. Those
+out-of-fold predictions form the calibration dataset. An isotonic calibrator is
+fit on those temporal out-of-fold predictions, then applied to the final
+CatBoost model trained on all eligible pre-holdout rows.
+
 Final holdout performance from the modeling plan:
 
 | Model | Holdout ROC-AUC | Notes |
@@ -459,27 +466,27 @@ Policy sensitivity:
 
 | Policy | Alerts | Captured claim cost | Avoided claim cost | Intervention cost | Net savings | ROI |
 |---|---:|---:|---:|---:|---:|---:|
-| Top 5% per facility | 226 | USD 192,000 | USD 38,400 | USD 22,600 | USD 15,800 | 0.70x |
-| Top 10% per facility | 401 | USD 304,500 | USD 60,900 | USD 40,100 | USD 20,800 | 0.52x |
-| Top 15% per facility | 590 | USD 449,500 | USD 89,900 | USD 59,000 | USD 30,900 | 0.52x |
-| Top 20% per facility | 753 | USD 584,500 | USD 116,900 | USD 75,300 | USD 41,600 | 0.55x |
-| Economic threshold | 455 | USD 334,000 | USD 66,800 | USD 45,500 | USD 21,300 | 0.47x |
+| Top 5% per facility | 226 | USD 212,500 | USD 42,500 | USD 22,600 | USD 19,900 | 0.88x |
+| Top 10% per facility | 401 | USD 399,500 | USD 79,900 | USD 40,100 | USD 39,800 | 0.99x |
+| Top 15% per facility | 590 | USD 474,500 | USD 94,900 | USD 59,000 | USD 35,900 | 0.61x |
+| Top 20% per facility | 753 | USD 557,500 | USD 111,500 | USD 75,300 | USD 36,200 | 0.48x |
+| Economic threshold | 995 | USD 795,500 | USD 159,100 | USD 99,500 | USD 59,600 | 0.60x |
 
 Primary policy effectiveness sensitivity:
 
 | Assumed effectiveness | Alerts | Captured claim cost | Avoided claim cost | Intervention cost | Net savings | ROI |
 |---:|---:|---:|---:|---:|---:|---:|
-| 15% | 401 | USD 304,500 | USD 45,675 | USD 40,100 | USD 5,575 | 0.14x |
-| 20% | 401 | USD 304,500 | USD 60,900 | USD 40,100 | USD 20,800 | 0.52x |
-| 25% | 401 | USD 304,500 | USD 76,125 | USD 40,100 | USD 36,025 | 0.90x |
+| 15% | 401 | USD 399,500 | USD 59,925 | USD 40,100 | USD 19,825 | 0.49x |
+| 20% | 401 | USD 399,500 | USD 79,900 | USD 40,100 | USD 39,800 | 0.99x |
+| 25% | 401 | USD 399,500 | USD 99,875 | USD 40,100 | USD 59,775 | 1.49x |
 
 Primary policy detail (`top_10pct_per_facility`):
 
 | Incident type | Actual events | Captured events | Captured claim cost | Capture rate |
 |---|---:|---:|---:|---:|
-| Return to hospital | 54 | 7 | USD 140,000 | 13.0% |
-| Fall | 159 | 39 | USD 136,500 | 24.5% |
-| Wound / pressure injury | 33 | 7 | USD 28,000 | 21.2% |
+| Return to hospital | 54 | 11 | USD 220,000 | 20.4% |
+| Fall | 159 | 41 | USD 143,500 | 25.8% |
+| Wound / pressure injury | 33 | 9 | USD 36,000 | 27.3% |
 | Altercation | 6 | 0 | USD 0 | 0.0% |
 | Medication error | 1 | 0 | USD 0 | 0.0% |
 

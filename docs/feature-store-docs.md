@@ -177,12 +177,16 @@ The practical training workflow in `modeling/train_models.py` is:
 2. Exclude the 5 meta columns and all target columns from `feature_cols`.
 3. Run expanding-window temporal cross-validation on pre-holdout data.
 4. Optionally run Optuna tuning to minimize cross-validated log loss.
-5. Train a final CatBoost model on all eligible pre-holdout rows.
-6. Evaluate on the January 2025 holdout.
-7. Log uncalibrated and calibrated model variants to MLflow.
+5. Generate leakage-safe calibration data from purged expanding-window
+   out-of-fold predictions.
+6. Fit an isotonic calibrator on those temporal out-of-fold predictions.
+7. Train a final CatBoost model on all eligible pre-holdout rows.
+8. Evaluate on the January 2025 holdout.
+9. Log uncalibrated and calibrated model variants to MLflow.
 
-The calibrated variant uses `CalibratedClassifierCV` with `method="sigmoid"`
-and `cv=5`.
+The calibrated variant wraps the final CatBoost model with an isotonic
+calibrator. The calibrator is fitted only on predictions from folds where the
+fold model was trained on labels fully known before that fold boundary.
 
 ## Temporal Validation and Holdout Split
 
