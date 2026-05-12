@@ -152,18 +152,21 @@ Leakage controls:
 - hospital admission context checks both event dates and row creation dates
 - target windows are separated from feature lookback windows
 
-Train/test/holdout splitting is chronological:
+Validation and holdout splitting are chronological:
 
-| Split | Window rule | Purpose |
+| Stage | Window rule | Purpose |
 |---|---|---|
-| Train | `window_start < 2024-07-01` | Fit candidate models |
-| Test | `2024-07-01 <= window_start < 2025-01-01` | Temporal validation and calibration checks |
+| Temporal CV | Expanding fold boundaries before `2025-01-01` | Validation and hyperparameter checks |
+| Final train | `window_end <= 2025-01-01` | Fit final pre-holdout model |
 | Holdout | `window_start >= 2025-01-01` | Simulated first production month |
 
-The training code also uses expanding-window temporal validation. Fold logic
-purges training labels whose outcome window would cross into the test period.
-That matters because a row with `window_start` before a boundary can still have
-an outcome window that reaches after the boundary.
+Fold logic purges training labels whose outcome window would cross into the
+validation period. That matters because a row with `window_start` before a
+boundary can still have an outcome window that reaches after the boundary.
+Calibration follows the same temporal discipline: calibrated Tier 1 models use
+isotonic calibration fitted on purged expanding-window out-of-fold predictions,
+then apply that calibrator to the final CatBoost model trained on all eligible
+pre-holdout rows.
 
 ## Modeling Strategy
 
@@ -409,30 +412,30 @@ Primary policy result, `top_10pct_per_facility`:
 |---|---:|
 | Alerts | 401 |
 | Alert rate | 11.1% |
-| Captured claim exposure | USD 304,500 |
-| Claim exposure capture rate | 17.0% |
-| Estimated avoided claim dollars | USD 60,900 |
+| Captured claim exposure | USD 399,500 |
+| Claim exposure capture rate | 22.3% |
+| Estimated avoided claim dollars | USD 79,900 |
 | Intervention cost | USD 40,100 |
-| Estimated net savings | USD 20,800 |
-| Estimated ROI | 0.52x |
+| Estimated net savings | USD 39,800 |
+| Estimated ROI | 0.99x |
 
 Policy sensitivity:
 
 | Policy | Alerts | Captured claim cost | Avoided claim cost | Intervention cost | Net savings | ROI |
 |---|---:|---:|---:|---:|---:|---:|
-| Top 5% per facility | 226 | USD 192,000 | USD 38,400 | USD 22,600 | USD 15,800 | 0.70x |
-| Top 10% per facility | 401 | USD 304,500 | USD 60,900 | USD 40,100 | USD 20,800 | 0.52x |
-| Top 15% per facility | 590 | USD 449,500 | USD 89,900 | USD 59,000 | USD 30,900 | 0.52x |
-| Top 20% per facility | 753 | USD 584,500 | USD 116,900 | USD 75,300 | USD 41,600 | 0.55x |
-| Economic threshold | 455 | USD 334,000 | USD 66,800 | USD 45,500 | USD 21,300 | 0.47x |
+| Top 5% per facility | 226 | USD 212,500 | USD 42,500 | USD 22,600 | USD 19,900 | 0.88x |
+| Top 10% per facility | 401 | USD 399,500 | USD 79,900 | USD 40,100 | USD 39,800 | 0.99x |
+| Top 15% per facility | 590 | USD 474,500 | USD 94,900 | USD 59,000 | USD 35,900 | 0.61x |
+| Top 20% per facility | 753 | USD 557,500 | USD 111,500 | USD 75,300 | USD 36,200 | 0.48x |
+| Economic threshold | 995 | USD 795,500 | USD 159,100 | USD 99,500 | USD 59,600 | 0.60x |
 
 Primary policy effectiveness sensitivity:
 
 | Assumed effectiveness | Alerts | Captured claim cost | Avoided claim cost | Intervention cost | Net savings | ROI |
 |---:|---:|---:|---:|---:|---:|---:|
-| 15% | 401 | USD 304,500 | USD 45,675 | USD 40,100 | USD 5,575 | 0.14x |
-| 20% | 401 | USD 304,500 | USD 60,900 | USD 40,100 | USD 20,800 | 0.52x |
-| 25% | 401 | USD 304,500 | USD 76,125 | USD 40,100 | USD 36,025 | 0.90x |
+| 15% | 401 | USD 399,500 | USD 59,925 | USD 40,100 | USD 19,825 | 0.49x |
+| 20% | 401 | USD 399,500 | USD 79,900 | USD 40,100 | USD 39,800 | 0.99x |
+| 25% | 401 | USD 399,500 | USD 99,875 | USD 40,100 | USD 59,775 | 1.49x |
 
 The most important metric is captured claim exposure: dollars from actual
 holdout events that had an alert before the event occurred. Net savings and ROI
@@ -606,8 +609,8 @@ Daily scoring parameters:
 
 This backtest shows that the system can put meaningful claim dollars in front
 of facility teams before incidents occur. The January 2025 primary policy
-captured USD 304,500 of claim exposure with 401 alerts, producing an estimated
-USD 20,800 in net savings under the 20% baseline effectiveness scenario.
+captured USD 399,500 of claim exposure with 401 alerts, producing an estimated
+USD 39,800 in net savings under the 20% baseline effectiveness scenario.
 
 Those savings are not causal proof. The recommended next step is a prospective
 pilot that measures actual claims versus expected claims after deployment,

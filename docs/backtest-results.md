@@ -17,11 +17,11 @@ Baseline intervention effectiveness: 20.0%
 Policy: `top_10pct_per_facility`
 
 - Alerts: 401 of 3,612 scored windows (11.1%)
-- Actual claim exposure captured: $304,500 of $1,788,500 (17.0%)
-- Estimated avoided claim dollars: $60,900
+- Actual claim exposure captured: $399,500 of $1,788,500 (22.3%)
+- Estimated avoided claim dollars: $79,900
 - Intervention cost: $40,100
-- Estimated net savings: $20,800
-- Estimated ROI: 0.52x
+- Estimated net savings: $39,800
+- Estimated ROI: 0.99x
 
 ## Sensitivity
 
@@ -29,27 +29,27 @@ Policy: `top_10pct_per_facility`
 
 | Policy | Alerts | Captured claim cost | Avoided claim cost | Intervention cost | Net savings | ROI |
 |---|---:|---:|---:|---:|---:|---:|
-| `top_05pct_per_facility` | 226 | $192,000 | $38,400 | $22,600 | $15,800 | 0.70x |
-| `top_10pct_per_facility` | 401 | $304,500 | $60,900 | $40,100 | $20,800 | 0.52x |
-| `top_15pct_per_facility` | 590 | $449,500 | $89,900 | $59,000 | $30,900 | 0.52x |
-| `top_20pct_per_facility` | 753 | $584,500 | $116,900 | $75,300 | $41,600 | 0.55x |
-| `economic_threshold` | 455 | $334,000 | $66,800 | $45,500 | $21,300 | 0.47x |
+| `top_05pct_per_facility` | 226 | $212,500 | $42,500 | $22,600 | $19,900 | 0.88x |
+| `top_10pct_per_facility` | 401 | $399,500 | $79,900 | $40,100 | $39,800 | 0.99x |
+| `top_15pct_per_facility` | 590 | $474,500 | $94,900 | $59,000 | $35,900 | 0.61x |
+| `top_20pct_per_facility` | 753 | $557,500 | $111,500 | $75,300 | $36,200 | 0.48x |
+| `economic_threshold` | 995 | $795,500 | $159,100 | $99,500 | $59,600 | 0.60x |
 
 ### Primary Policy Effectiveness Sensitivity
 
 | Assumed effectiveness | Alerts | Captured claim cost | Avoided claim cost | Intervention cost | Net savings | ROI |
 |---:|---:|---:|---:|---:|---:|---:|
-| 15.0% | 401 | $304,500 | $45,675 | $40,100 | $5,575 | 0.14x |
-| 20.0% | 401 | $304,500 | $60,900 | $40,100 | $20,800 | 0.52x |
-| 25.0% | 401 | $304,500 | $76,125 | $40,100 | $36,025 | 0.90x |
+| 15.0% | 401 | $399,500 | $59,925 | $40,100 | $19,825 | 0.49x |
+| 20.0% | 401 | $399,500 | $79,900 | $40,100 | $39,800 | 0.99x |
+| 25.0% | 401 | $399,500 | $99,875 | $40,100 | $59,775 | 1.49x |
 
 ## Primary Policy By Incident Type
 
 | Incident type | Actual events | Captured events | Captured claim cost | Capture rate |
 |---|---:|---:|---:|---:|
-| Return to hospital | 54 | 7 | $140,000 | 13.0% |
-| Fall | 159 | 39 | $136,500 | 24.5% |
-| Wound / pressure injury | 33 | 7 | $28,000 | 21.2% |
+| Return to hospital | 54 | 11 | $220,000 | 20.4% |
+| Fall | 159 | 41 | $143,500 | 25.8% |
+| Wound / pressure injury | 33 | 9 | $36,000 | 27.3% |
 | Altercation | 6 | 0 | $0 | 0.0% |
 | Medication error | 1 | 0 | $0 | 0.0% |
 

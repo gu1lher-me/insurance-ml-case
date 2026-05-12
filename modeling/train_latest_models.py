@@ -15,16 +15,17 @@ import mlflow
 import mlflow.catboost
 import mlflow.sklearn
 import polars as pl
-from sklearn.calibration import CalibratedClassifierCV
 
 from modeling.hyperparameter_tuning import load_hyperparameters
 from modeling.train_models import (
+    ARTIFACTS_DIR,
     HYPERPARAMETERS_DIR,
     META_COLS,
     TARGET_CONFIG,
     configure_mlflow,
     load_data,
     make_catboost,
+    train_temporal_isotonic_model,
 )
 
 
@@ -74,20 +75,21 @@ def train_tier1_target(target: str, label_cutoff: datetime) -> None:
     if train_df.is_empty():
         raise ValueError(f"No matured rows available for {target} by {label_cutoff.date()}")
 
-    X = train_df.select(feature_cols)
     y = train_df[target].to_numpy().ravel()
 
     params, params_path = load_hyperparameters(HYPERPARAMETERS_DIR, target)
-    model = CalibratedClassifierCV(
-        estimator=make_catboost(params),
-        cv=5,
-        method="sigmoid",
-    )
     print(
         f"  Training {target}: {len(y):,} rows, positive rate={y.mean():.4%}, "
         f"params={params_path.name if params_path else 'defaults'}"
     )
-    model.fit(X, y)
+    calibrated = train_temporal_isotonic_model(
+        train_df,
+        target,
+        feature_cols,
+        TARGET_CONFIG[target]["horizon_days"],
+        model_params=params,
+        end_date=label_cutoff,
+    )
 
     with mlflow.start_run(run_name=f"{target}_catboost_latest_calibrated"):
         mlflow.set_tag("target", target)
@@ -98,8 +100,13 @@ def train_tier1_target(target: str, label_cutoff: datetime) -> None:
                 "target": target,
                 "algorithm": "catboost",
                 "calibrated": True,
-                "calibration_method": "sigmoid",
-                "calibration_cv": 5,
+                "calibration_method": "isotonic",
+                "calibration_strategy": "temporal_oof_expanding_window",
+                "calibration_folds": calibrated["calibration_folds"].height,
+                "calibration_size": len(calibrated["y_calibration"]),
+                "calibration_positive_rate": round(
+                    float(calibrated["y_calibration"].mean()), 6
+                ),
                 "n_features": len(feature_cols),
                 "train_size": len(y),
                 "train_positive_rate": round(float(y.mean()), 6),
@@ -110,7 +117,13 @@ def train_tier1_target(target: str, label_cutoff: datetime) -> None:
         )
         if params:
             mlflow.log_params({f"catboost_{k}": v for k, v in params.items()})
-        mlflow.sklearn.log_model(model, "model")
+        mlflow.sklearn.log_model(calibrated["model"], "model")
+
+        calibration_fold_path = (
+            ARTIFACTS_DIR / f"{target}_production_temporal_calibration_fold_metrics.csv"
+        )
+        calibrated["calibration_folds"].write_csv(calibration_fold_path)
+        mlflow.log_artifact(str(calibration_fold_path))
 
 
 def _load_raw_for_altercation(label_cutoff: datetime):

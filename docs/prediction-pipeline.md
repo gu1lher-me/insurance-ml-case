@@ -37,7 +37,7 @@ This performs:
 
 1. rebuild 7-day falls/RTH historical training matrix through `label_cutoff`,
 2. rebuild 14-day wound historical training matrix through `label_cutoff`,
-3. train calibrated Tier 1 models and log them to MLflow with
+3. train temporal out-of-fold isotonic calibrated Tier 1 models and log them to MLflow with
    `tags.phase = production_model`,
 4. build target-free scoring features for `as_of_date`,
 5. score ML probabilities and point-in-time business rules,
