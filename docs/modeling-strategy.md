@@ -335,7 +335,7 @@ Current baseline assumption:
 |---|---:|
 | Uniform intervention effectiveness | 20% |
 
-The backtest also reports sensitivity at 10%, 15%, 20%, and 25%. This keeps
+The backtest also reports sensitivity at 15%, 20%, and 25%. This keeps
 the POC simpler and avoids false precision: the project has evidence that these
 incident types are operationally preventable, but it does not have
 Tricura-specific causal estimates by incident type.
@@ -469,7 +469,6 @@ Primary policy effectiveness sensitivity:
 
 | Assumed effectiveness | Alerts | Captured claim cost | Avoided claim cost | Intervention cost | Net savings | ROI |
 |---:|---:|---:|---:|---:|---:|---:|
-| 10% | 401 | USD 304,500 | USD 30,450 | USD 40,100 | -USD 9,650 | -0.24x |
 | 15% | 401 | USD 304,500 | USD 45,675 | USD 40,100 | USD 5,575 | 0.14x |
 | 20% | 401 | USD 304,500 | USD 60,900 | USD 40,100 | USD 20,800 | 0.52x |
 | 25% | 401 | USD 304,500 | USD 76,125 | USD 40,100 | USD 36,025 | 0.90x |

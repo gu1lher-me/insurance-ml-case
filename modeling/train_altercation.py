@@ -29,7 +29,6 @@ import mlflow
 import mlflow.catboost
 import mlflow.sklearn
 import numpy as np
-import pandas as pd
 import polars as pl
 import optuna
 from catboost import CatBoostClassifier
@@ -397,8 +396,8 @@ def tune_stratified_hyperparameters(X, y, n_trials, n_splits=5):
 
         for train_idx, test_idx in skf.split(X, y):
             model = make_catboost(model_params)
-            model.fit(X.iloc[train_idx], y[train_idx])
-            oof_prob[test_idx] = model.predict_proba(X.iloc[test_idx])[:, 1]
+            model.fit(X[train_idx], y[train_idx])
+            oof_prob[test_idx] = model.predict_proba(X[test_idx])[:, 1]
 
         return log_loss(y, oof_prob, labels=[0, 1])
 
@@ -420,7 +419,7 @@ def run_stratified_cv(X, y, feature_cols, n_splits=5, model_params=None):
     all_y_prob = []
 
     for fold_idx, (train_idx, test_idx) in enumerate(skf.split(X, y)):
-        X_train, X_test = X.iloc[train_idx], X.iloc[test_idx]
+        X_train, X_test = X[train_idx], X[test_idx]
         y_train, y_test = y[train_idx], y[test_idx]
 
         model = make_catboost(model_params)
@@ -443,7 +442,7 @@ def run_stratified_cv(X, y, feature_cols, n_splits=5, model_params=None):
             f"pos={int(y_test.sum())}  ROC-AUC={metrics['roc_auc']:.4f}"
         )
 
-    fold_df = pd.DataFrame(fold_records)
+    fold_df = pl.DataFrame(fold_records)
     pooled_metrics = compute_metrics(np.array(all_y_true), np.array(all_y_prob))
     return fold_df, pooled_metrics
 
@@ -485,7 +484,7 @@ def main():
     print(f"  {df.shape[0]:,} residents, {len(feature_cols)} features")
     print(f"  Positive rate: {df[target_col].mean():.2%}")
 
-    X = df.select(feature_cols).to_pandas()
+    X = df.select(feature_cols)
     y = df[target_col].to_numpy().ravel()
 
     configure_mlflow()
@@ -561,7 +560,7 @@ def main():
             mlflow.log_metric(f"cv_{m}_std", fold_df[m].std())
 
         fold_csv = ARTIFACTS_DIR / "altercation_cv_fold_metrics.csv"
-        fold_df.to_csv(fold_csv, index=False)
+        fold_df.write_csv(fold_csv)
         mlflow.log_artifact(str(fold_csv))
 
     # ── Final model on full dataset ──────────────────────────────────────────
@@ -574,15 +573,15 @@ def main():
     oof_prob_cal = np.zeros(len(y))
     for train_idx, test_idx in skf.split(X, y):
         m = make_catboost(model_params)
-        m.fit(X.iloc[train_idx], y[train_idx])
-        oof_prob_uncal[test_idx] = m.predict_proba(X.iloc[test_idx])[:, 1]
+        m.fit(X[train_idx], y[train_idx])
+        oof_prob_uncal[test_idx] = m.predict_proba(X[test_idx])[:, 1]
 
         cm = CalibratedClassifierCV(
             estimator=make_catboost(model_params),
             cv=3, method="sigmoid",
         )
-        cm.fit(X.iloc[train_idx], y[train_idx])
-        oof_prob_cal[test_idx] = cm.predict_proba(X.iloc[test_idx])[:, 1]
+        cm.fit(X[train_idx], y[train_idx])
+        oof_prob_cal[test_idx] = cm.predict_proba(X[test_idx])[:, 1]
 
     metrics_uncal = compute_metrics(y, oof_prob_uncal)
     metrics_cal = compute_metrics(y, oof_prob_cal)
@@ -637,14 +636,14 @@ def main():
         plt.close(fig)
 
         fi_df = (
-            pd.DataFrame({"feature": feature_cols, "importance": model.feature_importances_})
-            .sort_values("importance", ascending=False, key=np.abs)
-            .reset_index(drop=True)
+            pl.DataFrame({"feature": feature_cols, "importance": model.feature_importances_})
+            .with_columns(pl.col("importance").abs().alias("_abs_importance"))
+            .sort("_abs_importance", descending=True)
+            .with_row_index("rank", offset=1)
+            .drop("_abs_importance")
         )
-        fi_df.index = fi_df.index + 1
-        fi_df.index.name = "rank"
         fi_path = ARTIFACTS_DIR / "altercation_catboost_feature_importance.csv"
-        fi_df.to_csv(fi_path)
+        fi_df.write_csv(fi_path)
         mlflow.log_artifact(str(fi_path))
 
         mlflow.catboost.log_model(model, "model")

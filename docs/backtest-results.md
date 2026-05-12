@@ -39,7 +39,6 @@ Policy: `top_10pct_per_facility`
 
 | Assumed effectiveness | Alerts | Captured claim cost | Avoided claim cost | Intervention cost | Net savings | ROI |
 |---:|---:|---:|---:|---:|---:|---:|
-| 10.0% | 401 | $304,500 | $30,450 | $40,100 | -$9,650 | -0.24x |
 | 15.0% | 401 | $304,500 | $45,675 | $40,100 | $5,575 | 0.14x |
 | 20.0% | 401 | $304,500 | $60,900 | $40,100 | $20,800 | 0.52x |
 | 25.0% | 401 | $304,500 | $76,125 | $40,100 | $36,025 | 0.90x |

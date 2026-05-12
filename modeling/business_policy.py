@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
-import pandas as pd
+import polars as pl
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -36,7 +36,7 @@ SUPPORTED_EVENT_TYPES = tuple(AVG_CLAIM_COST.keys())
 # baseline value for the POC to avoid false precision; replace it with
 # incident-specific measured effects after a prospective pilot.
 DEFAULT_INTERVENTION_EFFECTIVENESS = 0.20
-INTERVENTION_EFFECTIVENESS_SENSITIVITY = (0.10, 0.15, 0.20, 0.25)
+INTERVENTION_EFFECTIVENESS_SENSITIVITY = (0.15, 0.20, 0.25)
 INTERVENTION_EFFECTIVENESS = {
     event_type: DEFAULT_INTERVENTION_EFFECTIVENESS
     for event_type in SUPPORTED_EVENT_TYPES
@@ -110,14 +110,14 @@ def load_rule_precisions(
     if not path.exists():
         return dict(RULE_PRECISION_FALLBACK)
 
-    df = pd.read_csv(path)
+    df = pl.read_csv(path)
     name_to_event = {
         "Medication Errors": "med_error",
         "Elopement": "elopement",
     }
 
     precisions = dict(RULE_PRECISION_FALLBACK)
-    for _, row in df.iterrows():
+    for row in df.iter_rows(named=True):
         event_type = name_to_event.get(row["name"])
         if event_type:
             precisions[event_type] = float(row["precision"])
